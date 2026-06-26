@@ -1,10 +1,14 @@
 use std::sync::Arc;
 
 use axum::{
+    body::{to_bytes, Body},
     extract::{DefaultBodyLimit, Extension},
-    http::{StatusCode, Uri},
+    http::{
+        header::{CONTENT_LENGTH, CONTENT_TYPE},
+        Response, StatusCode, Uri,
+    },
     middleware::{self, Next},
-    response::IntoResponse,
+    response::{IntoResponse, Redirect},
     routing::{get, post},
     Json, Router,
 };
@@ -18,11 +22,23 @@ use super::{auth, handlers, ws};
 use crate::app_state::AppState;
 use tracing::Instrument;
 
+const SERVER_BASE_PATH_PLACEHOLDER: &str = "/__CODEG_BASE_PATH__";
+
 pub fn build_router(
     state: Arc<AppState>,
     token: String,
     static_dir: std::path::PathBuf,
     shutdown_signal: Arc<ShutdownSignal>,
+) -> Router {
+    build_router_with_base_path(state, token, static_dir, shutdown_signal, "")
+}
+
+pub fn build_router_with_base_path(
+    state: Arc<AppState>,
+    token: String,
+    static_dir: std::path::PathBuf,
+    shutdown_signal: Arc<ShutdownSignal>,
+    base_path: &str,
 ) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -912,7 +928,10 @@ pub fn build_router(
             "/automation_list",
             post(handlers::automation::automation_list),
         )
-        .route("/automation_get", post(handlers::automation::automation_get))
+        .route(
+            "/automation_get",
+            post(handlers::automation::automation_get),
+        )
         .route(
             "/automation_runs",
             post(handlers::automation::automation_runs),
@@ -1061,12 +1080,14 @@ pub fn build_router(
         ServeDir::new(&static_dir).fallback(ServeFile::new(static_dir.join("index.html")));
 
     let static_dir_for_mw = static_dir.clone();
+    let base_path_for_mw = base_path.trim().trim_end_matches('/').to_string();
     let html_rewrite = middleware::from_fn(move |req: axum::extract::Request, next: Next| {
         let dir = static_dir_for_mw.clone();
+        let base_path = base_path_for_mw.clone();
         async move {
             let path = req.uri().path();
             // If path has no extension (not a file) and a .html version exists, rewrite
-            if path != "/"
+            let req = if path != "/"
                 && !path.contains('.')
                 && !path.starts_with("/api")
                 && !path.starts_with("/ws")
@@ -1083,23 +1104,43 @@ pub fn build_router(
                     if let Ok(new_uri) = new_path.parse::<Uri>() {
                         let (mut parts, body) = req.into_parts();
                         parts.uri = new_uri;
-                        let req = axum::extract::Request::from_parts(parts, body);
-                        return next.run(req).await;
+                        axum::extract::Request::from_parts(parts, body)
+                    } else {
+                        req
                     }
+                } else {
+                    req
                 }
-            }
-            next.run(req).await
+            } else {
+                req
+            };
+            rewrite_html_response(next.run(req).await, &base_path).await
         }
     });
 
-    Router::new()
+    let app = Router::new()
         .nest("/api", api)
         .merge(ws_route)
         .fallback_service(fallback)
         .layer(html_rewrite)
         .layer(cors)
         .layer(Extension(state))
-        .layer(Extension(shutdown_signal))
+        .layer(Extension(shutdown_signal));
+
+    let base_path = base_path.trim().trim_end_matches('/');
+    if base_path.is_empty() || base_path == "/" {
+        app
+    } else {
+        let workspace_path = format!("{base_path}/workspace");
+        let app = app.route(
+            "/",
+            get(move || {
+                let workspace_path = workspace_path.clone();
+                async move { Redirect::temporary(&workspace_path) }
+            }),
+        );
+        Router::new().nest(base_path, app)
+    }
 }
 
 async fn health_check() -> impl IntoResponse {
@@ -1123,4 +1164,132 @@ async fn api_not_found(uri: axum::http::Uri) -> impl IntoResponse {
             "message": format!("API endpoint '{}' is not available in web mode", command),
         })),
     )
+}
+
+async fn rewrite_html_response(response: Response<Body>, base_path: &str) -> Response<Body> {
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase());
+    let is_html = content_type
+        .as_deref()
+        .map(|value| value.contains("text/html"))
+        .unwrap_or(false);
+    let should_rewrite = content_type
+        .as_deref()
+        .map(|value| {
+            value.contains("text/html")
+                || value.contains("javascript")
+                || value.contains("text/css")
+                || value.contains("text/plain")
+                || value.contains("application/json")
+        })
+        .unwrap_or(false);
+
+    if !should_rewrite {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let bytes = match to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::warn!("[WEB] Failed to rewrite HTML base path: {}", err);
+            let mut response = Response::new(Body::from("Failed to rewrite HTML response"));
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            return response;
+        }
+    };
+
+    let body = String::from_utf8_lossy(&bytes);
+    let rewritten = rewrite_static_body_for_base_path(&body, base_path, is_html);
+    parts.headers.remove(CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(rewritten))
+}
+
+fn rewrite_static_body_for_base_path(body: &str, base_path: &str, is_html: bool) -> String {
+    let base_path = base_path.trim().trim_end_matches('/');
+    let base_path = if base_path == "/" { "" } else { base_path };
+    let mut rewritten = body.to_string();
+
+    if !is_html {
+        return rewritten.replace(SERVER_BASE_PATH_PLACEHOLDER, base_path);
+    }
+
+    if base_path.is_empty() || base_path == "/" {
+        return rewritten.replace(SERVER_BASE_PATH_PLACEHOLDER, base_path);
+    }
+
+    for attr in ["href", "src", "action"] {
+        let placeholder_attr = format!(r#"{attr}="{SERVER_BASE_PATH_PLACEHOLDER}/"#);
+        let sentinel_attr = format!(r#"{attr}="__CODEG_BASE_PATH__ATTR__/"#);
+        rewritten = rewritten.replace(&placeholder_attr, &sentinel_attr);
+    }
+
+    let script_value = serde_json::to_string(base_path).unwrap_or_else(|_| "\"\"".to_string());
+    let script = format!(
+        "<script>window.__CODEG_BASE_PATH__={};</script>",
+        script_value
+    );
+
+    rewritten = if rewritten.contains("window.__CODEG_BASE_PATH__") {
+        rewritten
+    } else if rewritten.contains("<head>") {
+        rewritten.replacen("<head>", &format!("<head>{}", script), 1)
+    } else {
+        format!("{}{}", script, rewritten)
+    };
+
+    for attr in ["href", "src", "action"] {
+        rewritten = rewritten.replace(
+            &format!(r#"{attr}="/"#),
+            &format!(r#"{attr}="{base_path}/"#),
+        );
+        let sentinel_attr = format!(r#"{attr}="__CODEG_BASE_PATH__ATTR__/"#);
+        let placeholder_attr = format!(r#"{attr}="{SERVER_BASE_PATH_PLACEHOLDER}/"#);
+        rewritten = rewritten.replace(&sentinel_attr, &placeholder_attr);
+    }
+
+    rewritten.replace(SERVER_BASE_PATH_PLACEHOLDER, base_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_static_body_for_base_path;
+
+    #[test]
+    fn rewrite_html_for_base_path_injects_runtime_base_and_prefixes_assets() {
+        let html = r#"<html><head><link href="/_next/app.css"></head><body><script src="/_next/app.js"></script></body></html>"#;
+
+        let rewritten = rewrite_static_body_for_base_path(html, "/claw/user-1", true);
+
+        assert!(rewritten.contains(r#"window.__CODEG_BASE_PATH__="/claw/user-1""#));
+        assert!(rewritten.contains(r#"href="/claw/user-1/_next/app.css""#));
+        assert!(rewritten.contains(r#"src="/claw/user-1/_next/app.js""#));
+        assert_eq!(rewrite_static_body_for_base_path(html, "", true), html);
+        assert_eq!(rewrite_static_body_for_base_path(html, "/", true), html);
+    }
+
+    #[test]
+    fn rewrite_html_for_base_path_replaces_build_placeholder_before_prefixing_assets() {
+        let html = r#"<html><head><link rel="icon" href="/icon.svg"><script src="/__CODEG_BASE_PATH__/_next/app.js"></script></head><body><script>self.__next_f.push([1,"[\"/__CODEG_BASE_PATH__/_next/chunk.js\"]"])</script></body></html>"#;
+
+        let rewritten = rewrite_static_body_for_base_path(html, "/claw/782", true);
+
+        assert!(rewritten.contains(r#"href="/claw/782/icon.svg""#));
+        assert!(rewritten.contains(r#"src="/claw/782/_next/app.js""#));
+        assert!(rewritten.contains(r#"\"/claw/782/_next/chunk.js"#));
+        assert!(!rewritten.contains("/claw/782/claw/782"));
+        assert!(!rewritten.contains("/__CODEG_BASE_PATH__"));
+    }
+
+    #[test]
+    fn rewrite_text_static_body_replaces_build_placeholder() {
+        let body = r#"1:"/__CODEG_BASE_PATH__/_next/static/chunk.js""#;
+
+        let rewritten = rewrite_static_body_for_base_path(body, "/claw/782", false);
+
+        assert_eq!(rewritten, r#"1:"/claw/782/_next/static/chunk.js""#);
+    }
 }

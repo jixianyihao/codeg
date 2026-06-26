@@ -4,6 +4,10 @@ import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useTranslations } from "next-intl"
 import { isDesktop } from "@/lib/platform"
+import {
+  replaceWithServerBasePath,
+  withServerBasePath,
+} from "@/lib/server-base-path"
 
 export default function LoginPage() {
   const router = useRouter()
@@ -29,7 +33,7 @@ export default function LoginPage() {
 
     try {
       // Validate token by calling a lightweight API endpoint
-      const res = await fetch("/api/health", {
+      const res = await fetch(withServerBasePath("/api/health"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -40,7 +44,7 @@ export default function LoginPage() {
 
       if (res.ok) {
         localStorage.setItem("codeg_token", token)
-        router.replace("/workspace")
+        replaceWithServerBasePath(router, "/workspace")
       } else if (res.status === 401) {
         setError(t("invalidToken"))
       } else {

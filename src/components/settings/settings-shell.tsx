@@ -32,6 +32,11 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { AppToaster } from "@/components/ui/app-toaster"
 import { cn } from "@/lib/utils"
 import { detectEnvironment } from "@/lib/transport/detect"
+import {
+  getServerBasePath,
+  stripServerBasePath,
+  withServerBasePath,
+} from "@/lib/server-base-path"
 import { AppTitleBar } from "@/components/layout/app-title-bar"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
@@ -150,7 +155,7 @@ export function SettingsShell({ children }: SettingsShellProps) {
   const t = useTranslations("SettingsShell")
   const pathname = usePathname()
   const router = useRouter()
-  const normalizedPathname = normalizePath(pathname)
+  const normalizedPathname = normalizePath(stripServerBasePath(pathname))
   const isMobile = useIsMobile()
   const [navOpen, setNavOpen] = useState(false)
 
@@ -174,9 +179,10 @@ export function SettingsShell({ children }: SettingsShellProps) {
       // navigating from /settings/appearance to /settings/mcp drops the
       // remote id and the next page falls back to the local Tauri backend.
       const search = window.location.search
-      const fullTarget = search ? `${target}${search}` : target
+      const serverTarget = withServerBasePath(target)
+      const fullTarget = search ? `${serverTarget}${search}` : serverTarget
 
-      if (isWindowsRuntime()) {
+      if (isWindowsRuntime() || getServerBasePath()) {
         window.location.assign(fullTarget)
         return
       }

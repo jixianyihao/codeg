@@ -1,5 +1,6 @@
 import { detectEnvironment } from "./detect"
 import type { RemoteTransportConfig, Transport } from "./types"
+import { getServerBasePath } from "@/lib/server-base-path"
 
 export type { RemoteTransportConfig, Transport, UnsubscribeFn } from "./types"
 
@@ -30,7 +31,7 @@ export function getShellTransport(): Transport {
     _shellTransport =
       env === "tauri"
         ? createTauriTransport()
-        : createWebTransport(window.location.origin)
+        : createWebTransport(`${window.location.origin}${getServerBasePath()}`)
   }
   return _shellTransport
 }

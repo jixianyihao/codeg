@@ -8,6 +8,7 @@ import {
 } from "./transport"
 import { getCodegToken } from "./transport/web-auth"
 import { notifyWebUnauthorized } from "./transport/web-connection-store"
+import { withServerBasePath } from "./server-base-path"
 import { getCurrentEffectiveAppLocale } from "./i18n"
 import { TurnBusyError, isTurnInProgressRejection } from "./turn-busy"
 import type { FolderThemeColor } from "./theme-presets"
@@ -1177,7 +1178,7 @@ export async function openMergeWindow(
       locale,
     }
   )
-  window.open(result.path, `merge-${folderId}`)
+  window.open(withServerBasePath(result.path), `merge-${folderId}`)
 }
 
 export async function openStashWindow(folderId: number): Promise<void> {
@@ -1193,7 +1194,7 @@ export async function openStashWindow(folderId: number): Promise<void> {
     "open_stash_window",
     { folderId, locale }
   )
-  window.open(result.path, `stash-${folderId}`)
+  window.open(withServerBasePath(result.path), `stash-${folderId}`)
 }
 
 export async function openPushWindow(folderId: number): Promise<void> {
@@ -1209,7 +1210,7 @@ export async function openPushWindow(folderId: number): Promise<void> {
     "open_push_window",
     { folderId, locale }
   )
-  window.open(result.path, `push-${folderId}`)
+  window.open(withServerBasePath(result.path), `push-${folderId}`)
 }
 
 export async function gitStashPush(
@@ -1433,7 +1434,7 @@ export async function openCommitWindow(folderId: number): Promise<void> {
     "open_commit_window",
     { folderId, locale }
   )
-  window.open(result.path, `commit-${folderId}`)
+  window.open(withServerBasePath(result.path), `commit-${folderId}`)
 }
 
 export type SettingsSection =
@@ -1470,7 +1471,7 @@ export async function openSettingsWindow(
       locale,
     }
   )
-  window.open(result.path, `settings-${section ?? "general"}`)
+  window.open(withServerBasePath(result.path), `settings-${section ?? "general"}`)
 }
 
 export async function openProjectBootWindow(source?: string): Promise<void> {
@@ -1482,7 +1483,7 @@ export async function openProjectBootWindow(source?: string): Promise<void> {
     })
   }
   if (typeof window !== "undefined") {
-    window.open("/project-boot", "project-boot")
+    window.open(withServerBasePath("/project-boot"), "project-boot")
   }
 }
 
@@ -1936,7 +1937,7 @@ export async function uploadAttachment(
   form.append("file", file, file.name)
   if (sessionId) form.append("session_id", sessionId)
 
-  const res = await fetch(`${window.location.origin}/api/upload_attachment`, {
+  const res = await fetch(withServerBasePath("/api/upload_attachment"), {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
     body: form,
@@ -2038,7 +2039,7 @@ async function workspaceFileFetch(
   if (!isMultipart) {
     headers["Content-Type"] = "application/json"
   }
-  const res = await fetch(`${window.location.origin}/api/${endpoint}`, {
+  const res = await fetch(withServerBasePath(`/api/${endpoint}`), {
     method: "POST",
     headers,
     body,
@@ -2101,7 +2102,7 @@ export async function uploadWorkspaceFile(
   return new Promise<UploadWorkspaceFileResult>((resolve, reject) => {
     const token = getCodegToken()
     const xhr = new XMLHttpRequest()
-    xhr.open("POST", `${window.location.origin}/api/upload_workspace_file`)
+    xhr.open("POST", withServerBasePath("/api/upload_workspace_file"))
     xhr.setRequestHeader("Authorization", `Bearer ${token}`)
 
     if (args.onProgress) {
@@ -3082,7 +3083,7 @@ export async function exportBackupWeb(
     { timeoutMs: BACKUP_LONG_CALL_TIMEOUT_MS }
   )
   const a = document.createElement("a")
-  a.href = `${window.location.origin}${ticket.url}`
+  a.href = `${window.location.origin}${withServerBasePath(ticket.url)}`
   a.download = ticket.filename
   document.body.appendChild(a)
   a.click()
@@ -3097,7 +3098,7 @@ export async function uploadBackupWeb(
   return new Promise<string>((resolve, reject) => {
     const token = getCodegToken()
     const xhr = new XMLHttpRequest()
-    xhr.open("POST", `${window.location.origin}/api/backup_upload`)
+    xhr.open("POST", withServerBasePath("/api/backup_upload"))
     xhr.setRequestHeader("Authorization", `Bearer ${token}`)
     if (onProgress) {
       xhr.upload.onprogress = (event) => {

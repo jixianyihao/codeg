@@ -152,6 +152,13 @@ async fn async_main() -> ExitCode {
     let data_dir =
         PathBuf::from(std::env::var("CODEG_DATA_DIR").expect("CODEG_DATA_DIR set by main()"));
     let static_dir_env = std::env::var("CODEG_STATIC_DIR").ok();
+    let base_path = std::env::var("CODEG_BASE_PATH")
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .unwrap_or_default();
+    if !base_path.is_empty() && base_path != "/" && !base_path.starts_with('/') {
+        tracing::error!("[SERVER][FATAL] CODEG_BASE_PATH must start with '/'");
+        return ExitCode::from(2);
+    }
 
     let static_dir = find_static_dir_standalone(static_dir_env.as_deref());
     let app_version = env!("CARGO_PKG_VERSION");
@@ -187,6 +194,9 @@ async fn async_main() -> ExitCode {
     tracing::info!("[SERVER] codeg-server v{}", app_version);
     tracing::info!("[SERVER] Data directory: {}", data_dir.display());
     tracing::info!("[SERVER] Static directory: {}", static_dir.display());
+    if !base_path.is_empty() && base_path != "/" {
+        tracing::info!("[SERVER] Base path: {}", base_path);
+    }
 
     // Initialize database
     let db = codeg_lib::db::init_database(&data_dir, app_version)
@@ -446,11 +456,12 @@ async fn async_main() -> ExitCode {
 
     // Build router
     let shutdown_signal = state.web_server_state.shutdown_signal();
-    let router = codeg_lib::web::router::build_router(
+    let router = codeg_lib::web::router::build_router_with_base_path(
         state.clone(),
         token.clone(),
         static_dir,
         shutdown_signal,
+        &base_path,
     );
 
     // Bind

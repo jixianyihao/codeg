@@ -5,6 +5,8 @@
 // rules, multi-tenant prefixing, etc.) doesn't have to be remembered at every
 // call site.
 
+import { stripServerBasePath, withServerBasePath } from "@/lib/server-base-path"
+
 const TOKEN_KEY = "codeg_token"
 
 export function getCodegToken(): string {
@@ -12,7 +14,7 @@ export function getCodegToken(): string {
 }
 
 export function redirectToCodegLogin(): void {
-  if (window.location.pathname.startsWith("/login")) return
+  if (stripServerBasePath(window.location.pathname).startsWith("/login")) return
   localStorage.removeItem(TOKEN_KEY)
-  window.location.href = "/login"
+  window.location.href = withServerBasePath("/login")
 }

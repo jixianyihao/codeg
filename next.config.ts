@@ -28,6 +28,7 @@ const withNextIntl = createNextIntlPlugin({
 
 const nextConfig: NextConfig = {
   output: "export",
+  basePath: "/__CODEG_BASE_PATH__",
   images: {
     unoptimized: true,
   },
