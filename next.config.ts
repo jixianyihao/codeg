@@ -3,6 +3,9 @@ import createNextIntlPlugin from "next-intl/plugin"
 
 const isProd = process.env.NODE_ENV === "production"
 const internalHost = process.env.TAURI_DEV_HOST || "localhost"
+const devServerUrl =
+  process.env.CODEG_DEV_SERVER_URL?.replace(/\/+$/, "") ??
+  "http://127.0.0.1:3080"
 const withNextIntl = createNextIntlPlugin({
   requestConfig: "./src/i18n/request.ts",
   experimental: {
@@ -27,8 +30,20 @@ const withNextIntl = createNextIntlPlugin({
 })
 
 const nextConfig: NextConfig = {
-  output: "export",
-  basePath: "/__CODEG_BASE_PATH__",
+  output: isProd ? "export" : undefined,
+  basePath: isProd ? "/__CODEG_BASE_PATH__" : undefined,
+  rewrites: isProd
+    ? undefined
+    : async () => [
+        {
+          source: "/api/:path*",
+          destination: `${devServerUrl}/api/:path*`,
+        },
+        {
+          source: "/ws/:path*",
+          destination: `${devServerUrl}/ws/:path*`,
+        },
+      ],
   images: {
     unoptimized: true,
   },
