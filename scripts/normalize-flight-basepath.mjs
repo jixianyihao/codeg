@@ -76,10 +76,14 @@ function collectPushes(html) {
   const lits = []
   let idx = 0
   while ((idx = html.indexOf(marker, idx)) !== -1) {
+    // A real type-1 chunk is `push([1,"..."])` — only whitespace may sit
+    // between the marker and the opening quote. Anything else means this is
+    // not a string chunk (e.g. `push([1,{...}])`); skip it rather than scanning
+    // to some far-off, unrelated quote.
     let q = idx + marker.length
-    while (q < html.length && html[q] !== '"') q++
+    while (q < html.length && (html[q] === " " || html[q] === "\t")) q++
     if (html[q] !== '"') {
-      idx = q + 1
+      idx = idx + marker.length
       continue
     }
     const end = findStringEnd(html, q)
