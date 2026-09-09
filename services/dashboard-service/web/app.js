@@ -556,7 +556,14 @@
       }
     }
   }
-  $("reload").addEventListener("click", reload)
+  $("reload").addEventListener("click", () => {
+    const auth = window.dashboardAuth
+    if (typeof auth?.login === "function" && !sessionStorage.getItem("dashboard-dev-token")) {
+      auth.login() // dev adapter only; production stays fail-closed
+      return
+    }
+    reload()
+  })
   $("retry-write").addEventListener("click", () =>
     mutate("", "", null, "", true)
   )

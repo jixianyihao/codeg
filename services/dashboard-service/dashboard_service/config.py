@@ -41,6 +41,9 @@ class Config:
     page_size_default: int = 20
     page_size_max: int = 50
     recovery_mode: bool = False
+    # DEV-ONLY page login adapter (DASHBOARD_DEV_LOGIN=1). Refused unless
+    # the control origin is loopback and a W3 verifier is configured.
+    dev_login: bool = False
 
     def validate(self) -> "Config":
         if not self.database_url.startswith("mysql+pymysql://"):
@@ -60,11 +63,20 @@ class Config:
             raise ValueError("Content origin must differ from the control origin")
         if self.w3_verify_url:
             url = urlsplit(self.w3_verify_url)
-            if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
-                raise ValueError("W3 verifier must be a fixed HTTPS endpoint without credentials")
+            loopback = url.hostname in ("localhost", "127.0.0.1", "::1")
+            scheme_ok = url.scheme == "https" or (url.scheme == "http" and loopback)
+            if not scheme_ok or not url.hostname or url.username or url.password                     or url.query or url.fragment:
+                raise ValueError("W3 verifier must be a fixed HTTPS endpoint "
+                                 "without credentials (loopback HTTP for dev)")
         if not 0 < self.max_upload_bytes <= MAX_UPLOAD_BYTES:
             raise ValueError("Upload limit must be between 1 byte and 10 MiB")
         self._validate_s3()
+        if self.dev_login:
+            if not self.w3_verify_url:
+                raise ValueError("DASHBOARD_DEV_LOGIN requires DASHBOARD_W3_VERIFY_URL")
+            control_host = urlsplit(self.control_origin).hostname or ""
+            if control_host not in ("localhost", "127.0.0.1", "::1"):
+                raise ValueError("DASHBOARD_DEV_LOGIN is only allowed on loopback origins")
         return self
 
     def _validate_s3(self) -> None:
@@ -106,6 +118,7 @@ class Config:
             s3_addressing_style=os.getenv("DASHBOARD_S3_ADDRESSING_STYLE", "path"),
             max_total_bytes=int(os.getenv("DASHBOARD_MAX_TOTAL_BYTES", str(10 * 1024**3))),
             recovery_mode=os.getenv("DASHBOARD_RECOVERY_MODE") == "1",
+            dev_login=os.getenv("DASHBOARD_DEV_LOGIN") == "1",
         ).validate()
 
     @classmethod
