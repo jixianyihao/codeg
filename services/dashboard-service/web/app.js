@@ -558,8 +558,10 @@
   }
   $("reload").addEventListener("click", () => {
     const auth = window.dashboardAuth
-    if (typeof auth?.login === "function" && !sessionStorage.getItem("dashboard-dev-token")) {
-      auth.login() // dev adapter only; production stays fail-closed
+    if (typeof auth?.login === "function") {
+      // Dev adapter: always offer its in-page login (works in webviews
+      // without native dialogs); production adapters stay fail-closed.
+      auth.login()
       return
     }
     reload()

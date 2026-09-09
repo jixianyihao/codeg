@@ -168,10 +168,29 @@ def create_control_app(config: Config | None = None, *, database: Database | Non
         return FileResponse(web_dir / "index.html", media_type="text/html",
                             headers={"Content-Security-Policy": page_policy})
 
+    @app.get("/dashboards/{dashboard_id}/view", include_in_schema=False)
+    def dashboard_full_view(dashboard_id: str):
+        """Stable bookmarkable route: full-viewport render only. The visitor
+        authenticates with their own identity; a fresh short-lived capability
+        is minted per load, so the URL stays valid while ACL changes apply
+        immediately."""
+        return FileResponse(web_dir / "view.html", media_type="text/html",
+                            headers={"Content-Security-Policy": page_policy})
+
+    @app.get("/view.js", include_in_schema=False)
+    def view_script():
+        return FileResponse(web_dir / "view.js", media_type="text/javascript",
+                            headers={"X-Content-Type-Options": "nosniff",
+                                     "Cache-Control": "no-store"})
+
     for name, media in (("app.js", "text/javascript"), ("styles.css", "text/css")):
         def static_file(name=name, media=media):
+            # Admin-page assets are small and change with the service;
+            # no-store prevents webviews from running stale login/view
+            # scripts against a freshly restarted backend.
             return FileResponse(web_dir / name, media_type=media,
-                                headers={"X-Content-Type-Options": "nosniff"})
+                                headers={"X-Content-Type-Options": "nosniff",
+                                         "Cache-Control": "no-store"})
         app.get(f"/{name}", include_in_schema=False)(static_file)
 
     @app.get("/auth-provider.js", include_in_schema=False)
