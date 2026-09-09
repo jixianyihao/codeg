@@ -69,12 +69,15 @@ def test_two_dashboards_do_not_leak(client, owner_setup, make_human):
     _grant(client, owner_token, created["dashboard_id"], "user", reader_id, "viewer")
     assert client.get(f"/api/v1/dashboards/{created['dashboard_id']}",
                       headers=human_headers(reader)).status_code == 200
-    # Grant on dashboard A grants nothing on dashboard B.
+    # Grant on dashboard A grants nothing on dashboard B — the DETAIL is
+    # where the boundary bites (the listing itself is public metadata).
     assert client.get(f"/api/v1/dashboards/{other['dashboard_id']}",
                       headers=human_headers(reader)).status_code == 404
     listing = client.get("/api/v1/dashboards?scope=all",
                          headers=human_headers(reader)).json()
-    assert [item["id"] for item in listing["items"]] == [created["dashboard_id"]]
+    listed = {item["id"]: item for item in listing["items"]}
+    assert listed[created["dashboard_id"]]["role"] == "viewer"
+    assert listed[other["dashboard_id"]]["role"] is None  # visible, not accessible
 
 
 def test_grant_expiry_boundary(client, owner_setup, make_human):
@@ -436,3 +439,71 @@ def test_write_only_service_scope_cannot_list_dashboards(client, operator,
     ok = client.get("/api/v1/dashboards", headers=service_headers(reader))
     assert ok.status_code == 200
     assert ok.json()["items"] == []
+
+
+# ------------------------------------------------------- public listing
+
+def test_published_listing_is_public_to_authenticated_humans(
+        client, make_human, make_service_account):
+    """Product decision 2026-09-09: the LIST shows every published board's
+    metadata to any authenticated human; per-board authorization applies at
+    detail/manage/capability time. Service accounts still see only granted
+    boards."""
+    owner_token = make_human("pub-owner", "List Owner")
+    created = publish_html(client, owner_token, b"<html>one</html>",
+                           auth_mode="human", title="公开列表甲").json()["result"]
+    second = publish_html(client, owner_token, b"<html>two</html>",
+                          auth_mode="human", title="公开列表乙").json()["result"]
+
+    stranger_token = make_human("pub-stranger", "Stranger")
+    listed = client.get("/api/v1/dashboards?scope=all",
+                        headers=human_headers(stranger_token))
+    assert listed.status_code == 200
+    items = {item["id"]: item for item in listed.json()["items"]}
+    assert created["dashboard_id"] in items and second["dashboard_id"] in items
+    assert items[created["dashboard_id"]]["role"] is None  # visible, no access
+
+    # Clicking in is where authorization happens.
+    assert client.get(f"/api/v1/dashboards/{created['dashboard_id']}",
+                      headers=human_headers(stranger_token)).status_code == 404
+    assert client.post(
+        f"/api/v1/dashboards/{created['dashboard_id']}/view-capabilities",
+        headers={**human_headers(stranger_token), "Idempotency-Key": str(uuid.uuid4())},
+        json={}).status_code == 404
+
+    # Service accounts keep the grant-scoped listing (and the read-scope gate).
+    principal_id, reader = make_service_account("pub-reader", scopes=("read",))
+    machine_items = client.get("/api/v1/dashboards?scope=all",
+                               headers=service_headers(reader)).json()["items"]
+    assert machine_items == []
+    granted = client.post(
+        f"/api/v1/dashboards/{created['dashboard_id']}/grants",
+        headers={**human_headers(owner_token), "Idempotency-Key": str(uuid.uuid4())},
+        json={"subject_type": "service", "subject_id": principal_id,
+              "role": "viewer", "expected_revision": 1})
+    assert granted.status_code == 200
+    machine_items = client.get("/api/v1/dashboards?scope=all",
+                               headers=service_headers(reader)).json()["items"]
+    assert [item["id"] for item in machine_items] == [created["dashboard_id"]]
+
+
+def test_archived_boards_stay_out_of_public_listing(client, make_human):
+    owner_token = make_human("arch-owner", "Arch Owner")
+    created = publish_html(client, owner_token, b"<html>x</html>",
+                           auth_mode="human", title="下架不外列").json()["result"]
+    dashboard_id = created["dashboard_id"]
+    assert client.post(
+        f"/api/v1/dashboards/{dashboard_id}/archive",
+        headers={**human_headers(owner_token), "Idempotency-Key": str(uuid.uuid4())},
+        json={"expected_revision": 1}).status_code == 200
+
+    stranger_token = make_human("arch-stranger", "Arch Stranger")
+    listed = client.get("/api/v1/dashboards?scope=all",
+                        headers=human_headers(stranger_token)).json()["items"]
+    assert all(item["id"] != dashboard_id for item in listed)
+    # Archived listing stays the owner's management view.
+    assert client.get("/api/v1/dashboards?status=archived",
+                      headers=human_headers(stranger_token)).json()["items"] == []
+    own = client.get("/api/v1/dashboards?status=archived",
+                     headers=human_headers(owner_token)).json()["items"]
+    assert [item["id"] for item in own] == [dashboard_id]

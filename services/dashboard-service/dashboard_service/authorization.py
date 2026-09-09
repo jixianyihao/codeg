@@ -179,10 +179,14 @@ class Authorizer:
 
     def visible_dashboard_query(self, actor: AuthContext, *, scope: str, status: str,
                                 search: str) -> Select:
-        """Server-side visibility filter: owner ∪ direct rule ∪ group rule ∪
-        public rule — all with the time window applied. ACL first, then
-        paging; never fetch-then-filter in the application. Archived listing
-        is the owner's management view: no shared/all archived listing."""
+        """Listing filter. Published metadata is PUBLIC to authenticated
+        humans (product decision 2026-09-09): the list shows every published
+        dashboard and per-board authorization is enforced when the caller
+        opens the detail, the manage page or a view capability — never by
+        the listing itself. Service accounts still list only boards they
+        are granted on. Archived listing remains the owner's management
+        view: no shared/all archived listing. ACL first, then paging; never
+        fetch-then-filter in the application."""
         moment = now()
         dash = models.dashboards
         base = select(dash.c.id).where(dash.c.status == status)
@@ -195,7 +199,7 @@ class Authorizer:
             base = base.where(~mine)
         if status == "archived" or scope == "mine":
             pass  # owner-only already applied above
-        else:
+        elif actor.principal_type == "service":
             time_ok = ((models.dashboard_grants.c.starts_at.is_(None)
                         | (models.dashboard_grants.c.starts_at <= moment))
                        & (models.dashboard_grants.c.expires_at.is_(None)
@@ -206,6 +210,7 @@ class Authorizer:
                     self._grant_subject_match(actor)))
             visible = grant_exists if scope == "shared" else or_(mine, grant_exists)
             base = base.where(visible)
+        # Human principals: published metadata is public — no grant filter.
         if search:
             base = base.where((dash.c.title.like(f"%{search}%"))
                               | (dash.c.description.like(f"%{search}%")))

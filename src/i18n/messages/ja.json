@@ -5223,6 +5223,7 @@
     "expires": "アクセス期限",
     "publishedAt": "公開日時",
     "webOnly": "Web モードのみ対応",
-    "invalidLink": "リンクを利用できません"
+    "invalidLink": "リンクを利用できません",
+    "noAccess": "権限なし"
   }
 }

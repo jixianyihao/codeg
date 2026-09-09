@@ -5223,6 +5223,7 @@
     "expires": "Zugriff endet",
     "publishedAt": "Veröffentlicht am",
     "webOnly": "Nur im Webmodus verfügbar",
-    "invalidLink": "Dashboard-Link nicht verfügbar"
+    "invalidLink": "Dashboard-Link nicht verfügbar",
+    "noAccess": "Kein Zugriff"
   }
 }

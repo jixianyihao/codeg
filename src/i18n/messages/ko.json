@@ -5223,6 +5223,7 @@
     "expires": "접근 만료",
     "publishedAt": "게시 시간",
     "webOnly": "웹 모드에서만 사용 가능",
-    "invalidLink": "링크를 사용할 수 없습니다"
+    "invalidLink": "링크를 사용할 수 없습니다",
+    "noAccess": "권한 없음"
   }
 }

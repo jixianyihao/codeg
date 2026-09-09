@@ -41,7 +41,7 @@
   }
 
   function errorText(error) {
-    if (error?.code === "AUTH_REQUIRED") return "登录状态已失效，请重新登录。"
+    if (error?.code === "AUTH_REQUIRED") return "需要企业身份登录后才能查看。"
     if (error?.code === "AUTH_NOT_CONFIGURED") return "尚未接入企业 W3 登录。"
     if (error?.status === 401) return "登录状态已失效，请重新登录。"
     if (error?.status === 403 || error?.status === 404)

@@ -1,17 +1,20 @@
 /* DEV-ONLY login adapter — served exclusively when the operator starts the
  * service with DASHBOARD_DEV_LOGIN=1 (Config refuses it off loopback). It
  * implements the same dashboardAuth boundary as the production adapter:
- * getAccessToken resolves the current dev user's token or rejects. The dev
- * token is a "dev-<name>" string verified by the local dev W3 stub; it lives
- * in sessionStorage only. Login uses an in-page overlay form — no native
- * dialogs, which embedded webviews commonly do not implement.
+ * getAccessToken resolves the current dev user's token; with no explicit
+ * login it falls back to a DEFAULT DEV TOKEN (dev-alice) so local E2E never
+ * blocks on authentication — the dev stand-in for the enterprise SSO session
+ * the production adapter will inherit. An explicit login (in-page overlay,
+ * no native dialogs) switches identity and stores "dev-<name>" in
+ * localStorage, shared by every tab of this origin; a successful submit
+ * reloads the page so the caller's flow (launcher/manage) continues alone.
  * Production deployments never set the flag and keep the fail-closed stub.
  */
 window.dashboardAuth = Object.freeze({
   async getAccessToken() {
-    const token = sessionStorage.getItem("dashboard-dev-token")
-    if (token) return token
-    throw new Error("AUTH_REQUIRED")
+    // Default session: dev-alice (owner of the demo boards). Only an
+    // explicit login/logout changes it; there is no unauthenticated state.
+    return localStorage.getItem("dashboard-dev-token") || "dev-alice"
   },
   login() {
     if (document.getElementById("dashboard-dev-login")) return
@@ -28,7 +31,8 @@ window.dashboardAuth = Object.freeze({
     title.textContent = "开发模式登录"
     title.style.cssText = "font-weight:600;margin-bottom:6px"
     const hint = document.createElement("div")
-    hint.textContent = "输入 dev 用户名（如 alice）。仅本机演示，凭据为 dev-<name>。"
+    hint.textContent =
+      "输入 dev 用户名（如 alice）。仅本机演示，凭据为 dev-<name>。"
     hint.style.cssText = "color:#526073;font-size:12px;margin-bottom:14px"
     const input = document.createElement("input")
     input.placeholder = "用户名"
@@ -49,14 +53,15 @@ window.dashboardAuth = Object.freeze({
     confirm.style.cssText =
       "border:0;background:#2563eb;color:#fff;border-radius:8px;padding:7px 20px;cursor:pointer"
     const error = document.createElement("div")
-    error.style.cssText = "color:#a52b36;font-size:12px;margin-bottom:10px;min-height:16px"
+    error.style.cssText =
+      "color:#a52b36;font-size:12px;margin-bottom:10px;min-height:16px"
     function submit() {
       const clean = input.value.trim().replace(/^dev-/, "")
       if (!/^[\w.-]{1,32}$/.test(clean)) {
         error.textContent = "用户名只能包含字母、数字、- _ ."
         return
       }
-      sessionStorage.setItem("dashboard-dev-token", `dev-${clean}`)
+      localStorage.setItem("dashboard-dev-token", `dev-${clean}`)
       location.reload()
     }
     confirm.addEventListener("click", submit)
@@ -71,7 +76,7 @@ window.dashboardAuth = Object.freeze({
     input.focus()
   },
   logout() {
-    sessionStorage.removeItem("dashboard-dev-token")
+    localStorage.removeItem("dashboard-dev-token")
     location.reload()
   },
 })

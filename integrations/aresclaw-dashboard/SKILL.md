@@ -59,5 +59,14 @@ Run `dashboard --help` and each subcommand's `--help` for exact flags. Normal
 conversations use the default human mode, which loads the environment's W3
 token file. Scheduled or CI jobs must use explicit
 `--auth-mode integration --config <json>`; raw token arguments and service URL
-overrides are forbidden. Never cat, echo, or quote the token file into the
-command line or the conversation.
+overrides are forbidden.
+
+Never cat, echo, or quote the token file into the command line or the
+conversation.
+
+Configuration by host type: on the standard execution host the default token
+file plus `ARESCLAW_DASHBOARD_SERVICE_URL` already point at the service. On a
+local/dev host the operator may place a `config.local.json` next to this
+Skill (service_url, workdir, optional token_file) — pass it with
+`--config config.local.json`. On Windows, invoke
+`python scripts/dashboard_cli.py` instead of the `scripts/dashboard` wrapper.

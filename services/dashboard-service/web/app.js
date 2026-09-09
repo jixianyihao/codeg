@@ -85,6 +85,8 @@
     }
     if (error.code === "AUTH_NOT_CONFIGURED")
       return "尚未接入企业 W3 登录。请联系管理员配置浏览器身份适配器。"
+    if (error.code === "AUTH_REQUIRED")
+      return "需要企业身份登录后才能查看。请点击“重新加载 / 登录”。"
     if (error.code === "HUMAN_REQUIRED")
       return "此页面仅支持企业用户登录，请使用 W3 用户身份。"
     if (error.code === "INVALID_SERVICE")
@@ -103,7 +105,6 @@
         error?.message === "AUTH_NOT_CONFIGURED"
           ? "AUTH_NOT_CONFIGURED"
           : "AUTH_REQUIRED"
-      failure.status = failure.code === "AUTH_REQUIRED" ? 401 : undefined
       throw failure
     }
     if (typeof token !== "string" || !token || /[\r\n]/.test(token)) {

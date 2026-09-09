@@ -5223,6 +5223,7 @@
     "expires": "Access expires",
     "publishedAt": "Published",
     "webOnly": "Available in Web mode only",
-    "invalidLink": "Dashboard link unavailable"
+    "invalidLink": "Dashboard link unavailable",
+    "noAccess": "No access"
   }
 }

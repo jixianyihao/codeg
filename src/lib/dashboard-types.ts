@@ -1,4 +1,6 @@
-export type DashboardRole = "owner" | "editor" | "viewer"
+// null = listed public metadata without any grant on this board;
+// authorization is checked when opening the board, not by the listing.
+export type DashboardRole = "owner" | "editor" | "viewer" | null
 export interface Dashboard {
   id: string
   title: string

@@ -5223,6 +5223,7 @@
     "expires": "访问到期",
     "publishedAt": "发布时间",
     "webOnly": "仅支持网页模式",
-    "invalidLink": "查看链接不可用"
+    "invalidLink": "查看链接不可用",
+    "noAccess": "无权限"
   }
 }

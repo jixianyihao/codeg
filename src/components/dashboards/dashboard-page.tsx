@@ -65,7 +65,7 @@ export function DashboardsPage() {
         setError(
           message.includes("dashboard_not_configured")
             ? "notConfigured"
-            : ("error" as const),
+            : ("error" as const)
         )
       } finally {
         if (ticket === request.current) setLoading(false)
@@ -222,7 +222,7 @@ export function DashboardsPage() {
                 <div className="mb-4 flex items-center justify-between gap-2">
                   <LayoutDashboard className="size-5 text-muted-foreground" />
                   <span className="rounded-md bg-secondary px-2 py-1 text-xs">
-                    {t(dashboard.role)}
+                    {t(dashboard.role ?? "noAccess")}
                   </span>
                 </div>
                 <h3 className="break-words text-base font-semibold">
