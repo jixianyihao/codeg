@@ -533,7 +533,7 @@ class DashboardCliTests(unittest.TestCase):
 
     def test_all_remaining_business_commands_map_to_http_contract(self):
         def response(_request):
-            return 200, {"Content-Type": "application/json"}, b"{}"
+            return 200, {"Content-Type": "application/json"}, b'{"state":"succeeded"}'
 
         server = self.server(self.identity_responder(response))
         config = self.write_config(server.url)

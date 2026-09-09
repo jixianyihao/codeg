@@ -1,6 +1,6 @@
 ---
 name: aresclaw-dashboard
-description: Use when a user asks to publish, update, inspect, share, revoke, roll back, archive, or restore an AresClaw HTML dashboard.
+description: Use when a user asks to create or save a dashboard draft, publish or update an AresClaw HTML dashboard, or manage its versions, access, or availability.
 ---
 
 # Managing AresClaw Dashboards
@@ -9,11 +9,38 @@ Use the bundled `scripts/dashboard` command. Its JSON stdout is the only
 evidence that a remote action completed. The Skill and CLI do not authenticate
 the user; the environment-provided W3 token file or the configured integration account does.
 
-Publish only after the user explicitly asks to publish. Generating or previewing
-HTML does not imply upload permission. A publishable artifact is one UTF-8 HTML
+Choose the requested action: creating a local HTML file is not permission to
+upload it; a request to save a dashboard draft authorizes saving, and a request
+to publish or update-and-publish authorizes publication without another prompt.
+A publishable artifact is one UTF-8 HTML
 file, at most 10 MiB, with required CSS, JavaScript, data, fonts, and images
 inline. It cannot rely on a CDN, other files, a build step, external APIs, or a
 backend.
+
+An update belongs to the same dashboard ID and stable link, regardless of
+frequency. Read `show` to identify the target and revision; resolve ambiguity
+before writing. Never create a new dashboard merely because its HTML changed.
+
+| User intent | Command |
+| --- | --- |
+| Create a dashboard shell to fill in later | `create --title ... --request-id ...` |
+| Save a candidate without affecting the live page | `save --file ... --dashboard-id ... --expected-revision ... --request-id ...` |
+| Save a new unpublished dashboard with HTML | `save --file ... --title ... --request-id ...` |
+| Update and publish immediately | `publish --file ... --dashboard-id ... --expected-revision ... --request-id ...` |
+| Publish the reviewed candidate | `publish --dashboard-id ... --version-id ... --expected-revision ... --request-id ...` |
+
+The file-free publish command requires the exact `draft_version_id`; do not
+guess the latest version or switch to a different draft on conflict. A published
+dashboard may have a separate draft: saving it leaves the live version alone.
+Report `result.status`, `result.disposition`, dashboard/version IDs and revision,
+not just exit 0. A saved draft is not live. `restore` returns an archived dashboard
+to draft; explicit publication is required to reopen its audience. Archived
+content cannot be previewed until restored. Management is in the AresClaw list
+panel; the public service link is for viewing, not a separate management page.
+
+For version updates, omitted title/description preserve the current metadata;
+an explicit empty description clears it. On a revision conflict, report it and
+re-read for a new deliberate decision; never silently rebase and overwrite.
 
 Before any write, run `dashboard new-request-id`. Pass that UUID with
 `--request-id`, and reuse it for every retry of the same logical operation.
@@ -24,12 +51,17 @@ Updates also require the dashboard's current `revision` as
 dashboard operation --request-id 2a4b9b27-1e98-4fa8-b285-63db7c87a692
 ```
 
-Do not retry an unknown write with a new UUID. The CLI freezes publish bytes,
+Do not retry an unknown write with a new UUID. The CLI freezes saved/published bytes,
 access-change JSON, and group-member replacements by request ID, bound to the
 verified principal from `/me` and the fixed service origin; a retry reuses the
 frozen bytes even if the source file has since changed or disappeared. The
 default human mode reads the environment's current-user token file fresh on
 every run.
+
+Saving and publishing are different operations and need different request IDs.
+For an immediate update-and-publish, use the single file-based publish operation
+rather than chaining save plus publish. Integration jobs use explicit commands,
+stable IDs/revisions and JSON results without interactive prompts.
 
 Read the CLI's exit code, not just its text: HTTP 200 with
 `state=failed` still exits non-zero (3/4/5/9 by the recorded error). Exit 6

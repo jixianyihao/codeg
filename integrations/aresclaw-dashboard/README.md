@@ -47,6 +47,26 @@ content or permission-change data, but never the JWT.
 
 ## Workflow
 
+There are two independent references: the live published version and the current
+draft. `save` never changes what existing viewers see. `publish --file` uploads and
+publishes atomically; without a file, `publish` requires the exact dashboard ID,
+draft version ID and expected revision. Dashboard IDs and viewing links do not
+change across updates. `restore` returns to draft, not directly to published.
+
+```sh
+dashboard create --title "Weekly report" --request-id <create-uuid>
+dashboard save --file report.html --dashboard-id <id> --expected-revision 1 --request-id <save-uuid>
+dashboard publish --dashboard-id <id> --version-id <draft-id> --expected-revision 2 --request-id <publish-uuid>
+dashboard publish --file report.html --dashboard-id <id> --expected-revision 3 --request-id <update-uuid>
+```
+
+The placeholders above must be replaced by actual IDs from results. Use a new
+UUID for a new action; retry the same action with its original UUID and arguments.
+Updating existing HTML does not require resending title/description: omit to
+preserve them, or supply an empty description explicitly to clear it. New
+dashboard creation with a file requires a title. `list --status draft` lists
+drafts the current caller can access.
+
 ```sh
 request_id="$(dashboard new-request-id | python3 -c 'import json,sys; print(json.load(sys.stdin)["request_id"])')"
 dashboard publish --file report.html --title "Weekly report" --request-id "$request_id"
@@ -59,7 +79,7 @@ revision. Grant and public-access dates accept absolute RFC3339 timestamps only.
 
 The command families are:
 
-- `list`, `show`, `source`, `publish`, and `operation`
+- `list`, `show`, `source`, `create`, `save`, `publish`, and `operation`
 - `rename`, `versions`, `rollback`, `archive`, and `restore`
 - `principals`, `grants`, `share`, `revoke`, `public`, `access`, and
   `access-apply`
@@ -76,7 +96,7 @@ of failing on the revision the first success bumped.
 
 Business results and errors are one JSON object on stdout. Diagnostics use
 stderr and never contain the loaded credential. Exit codes follow
-contracts.md section 7:
+[the canonical contracts, section 8](C:/Users/ouyan/Documents/code/acpdev/codeg/docs/aresclaw-dashboard/contracts.md):
 
 | Code | Meaning |
 | ---: | --- |
@@ -101,16 +121,22 @@ or an arbitrary service URL. A timeout or transport break during a write returns
 
 ## Frozen requests and recovery
 
-Every write's exact bytes are frozen locally under
+File uploads, access-change files and computed group replacements are frozen locally under
 `.aresclaw-dashboard/requests/<origin-hash>/<principal_id>/` before the first
 attempt, keyed by request ID and bound to the verified principal:
 
-- Retries of a publish or access-apply replay the frozen bytes even after the
+- Retries of a save, publish or access-apply replay the frozen bytes even after the
   source file is edited, moved, or deleted; the original file is read only
   when a snapshot is first created.
 - The same user with a renewed token resumes their own snapshots; a different
   user gets a separate namespace and never continues another user's request.
 - Snapshots contain no credentials.
+- Request UUIDs are normalized before credential loading or snapshot selection;
+  malformed IDs are rejected without sending a request. All snapshot path
+  components reject symbolic links and Windows directory junctions.
+- A save and a publish cannot reuse an upload request ID: disposition is frozen.
+  Plain JSON commands use the supplied immutable arguments; keep them unchanged
+  when retrying. Unknown operation states are protocol failures, never success.
 
 ## Tests
 

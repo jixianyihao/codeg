@@ -32,6 +32,8 @@ EXIT_REMOTE = 9
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 WRITE_ACTIONS = {
     "dashboard.publish",
+    "dashboard.create",
+    "dashboard.activate",
     "dashboard.rename",
     "dashboard.rollback",
     "dashboard.share",
@@ -131,7 +133,7 @@ def assert_safe_components(root: Path, target: Path, include_target: bool) -> No
     parts = relative.parts if include_target else relative.parts[:-1]
     for part in parts:
         current = current / part
-        if current.exists() and is_reparse(current):
+        if is_reparse(current):
             raise CliError("unsafe_path", "path contains a symbolic link or reparse point")
 
 
@@ -370,12 +372,21 @@ class DirectTransport:
         user never reuses it."""
         origin_key = hashlib.sha256(self.origin.encode("utf-8")).hexdigest()[:16]
         principal = self.principal()
+        principal_id = principal["principal_id"]
+        if not isinstance(principal_id, str) or not principal_id or len(principal_id) > 128 \
+                or not all(c.isascii() and (c.isalnum() or c in "-_") for c in principal_id):
+            raise CliError("invalid_response", "service principal ID is unsafe", EXIT_REMOTE)
         marker = self.workdir / ".aresclaw-dashboard"
-        if marker.exists() and is_reparse(marker):
-            raise CliError("unsafe_path", "request state directory is a link")
-        state = marker / "requests" / origin_key / principal["principal_id"]
+        state = marker / "requests" / origin_key / principal_id
+        assert_safe_components(self.workdir, state, True)
         state.mkdir(parents=True, exist_ok=True)
+        assert_safe_components(self.workdir, state, True)
         return state
+
+    def _snapshot_path(self, kind: str, request_id: str) -> Path:
+        path = self._state_dir() / f"{kind}-{validate_uuid(request_id, 'request-id')}.json"
+        assert_safe_components(self.workdir, path, True)
+        return path
 
     def freeze_publish(self, params: dict, request_id: str) -> dict:
         descriptor = {
@@ -383,12 +394,13 @@ class DirectTransport:
             "service_origin": self.origin,
             "principal_id": self.principal()["principal_id"],
             "path": relative_path(params["path"], "file"),
-            "title": params["title"],
-            "description": params.get("description", ""),
+            "title": params.get("title"),
+            "description": params.get("description"),
+            "disposition": params.get("disposition", "publish"),
             "dashboard_id": params.get("dashboard_id"),
             "expected_revision": params.get("expected_revision"),
         }
-        state_path = self._state_dir() / f"publish-{request_id}.json"
+        state_path = self._snapshot_path("publish", request_id)
         if state_path.exists():
             # Resume: only the frozen snapshot is needed. The original file
             # may have been moved or deleted — it is NOT re-read (R15).
@@ -396,7 +408,18 @@ class DirectTransport:
                 frozen = json.loads(state_path.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise CliError("request_state_invalid", "frozen request state is unreadable", EXIT_CONFLICT) from exc
-            if frozen.get("descriptor") != descriptor:
+            stored_descriptor = frozen.get("descriptor")
+            if isinstance(stored_descriptor, dict):
+                # Before draft support every upload was an immediate publish.
+                legacy = "disposition" not in stored_descriptor
+                stored_descriptor.setdefault("disposition", "publish")
+                if legacy and "description" not in params and stored_descriptor.get("description") == "":
+                    # Old CLI updates implicitly sent an empty description.
+                    # Resume that exact request, without changing new omission
+                    # semantics or equating new omitted/explicit-clear writes.
+                    descriptor["description"] = ""
+                    params = {**params, "description": ""}
+            if stored_descriptor != descriptor:
                 raise CliError("idempotency_conflict", "request ID was already used with different publish parameters", EXIT_CONFLICT)
             try:
                 html = base64.b64decode(frozen["content_base64"], validate=True)
@@ -431,7 +454,7 @@ class DirectTransport:
             "dashboard_id": dashboard_id,
             "expected_revision": expected_revision,
         }
-        state_path = self._state_dir() / f"access-{request_id}.json"
+        state_path = self._snapshot_path("access", request_id)
         if state_path.exists():
             try:
                 frozen = json.loads(state_path.read_text(encoding="utf-8"))
@@ -485,7 +508,7 @@ class DirectTransport:
             "change": params["change"],
             "expected_revision": params["expected_revision"],
         }
-        state_path = self._state_dir() / f"group-{request_id}.json"
+        state_path = self._snapshot_path("group", request_id)
         if state_path.exists():
             try:
                 frozen = json.loads(state_path.read_text(encoding="utf-8"))
@@ -559,12 +582,22 @@ class DirectTransport:
         elif action == "dashboard.publish":
             method = "POST"
             html = params["html_bytes"]
-            metadata = {"title": params["title"], "description": params.get("description", ""), "content_sha256": hashlib.sha256(html).hexdigest(), "byte_size": len(html)}
+            metadata = {"content_sha256": hashlib.sha256(html).hexdigest(), "byte_size": len(html),
+                        "disposition": params.get("disposition", "publish")}
+            for field in ("title", "description"):
+                if field in params:
+                    metadata[field] = params[field]
             if params.get("expected_revision") is not None:
                 metadata["expected_revision"] = params["expected_revision"]
             path = "/api/v1/dashboards" if not params.get("dashboard_id") else f"/api/v1/dashboards/{quote(params['dashboard_id'])}/versions"
             body, content_type = multipart(metadata, html)
             headers["Content-Type"] = content_type
+        elif action == "dashboard.create":
+            method, path = "POST", "/api/v1/dashboards/drafts"
+            body = json_bytes({"title": params["title"], "description": params.get("description", "")})
+        elif action == "dashboard.activate":
+            method, path = "POST", f"/api/v1/dashboards/{quote(params['dashboard_id'])}/publish"
+            body = json_bytes({"version_id": params["version_id"], "expected_revision": params["expected_revision"]})
         elif action == "dashboard.operation":
             if params.get("operation_id"):
                 path = f"/api/v1/operations/{quote(params['operation_id'])}"
@@ -737,20 +770,27 @@ def build_parser() -> JsonParser:
     item.add_argument("--scope", choices=["mine", "shared", "all"], default="mine")
     item.add_argument("--query")
     item.add_argument("--cursor")
-    item.add_argument("--status", choices=["published", "archived"])
+    item.add_argument("--status", choices=["draft", "published", "archived"])
     item = commands.add_parser("show")
     item.add_argument("dashboard_id")
     item = commands.add_parser("source")
     item.add_argument("dashboard_id")
     item.add_argument("--version-id", required=True)
     item.add_argument("--output", required=True)
-    item = commands.add_parser("publish")
-    item.add_argument("--file", required=True)
+    item = commands.add_parser("create", help="Create an empty private draft")
     item.add_argument("--title", required=True)
     item.add_argument("--description", default="")
-    item.add_argument("--dashboard-id")
-    item.add_argument("--expected-revision", type=int)
-    item.add_argument("--request-id", required=True)
+    add_common_write(item)
+    for name in ("save", "publish"):
+        item = commands.add_parser(name, help="Save a private draft" if name == "save" else "Upload and publish, or publish a named draft")
+        item.add_argument("--file", required=name == "save")
+        item.add_argument("--title")
+        item.add_argument("--description")
+        item.add_argument("--dashboard-id")
+        item.add_argument("--expected-revision", type=int)
+        if name == "publish":
+            item.add_argument("--version-id")
+        add_common_write(item)
     item = commands.add_parser("operation")
     choice = item.add_mutually_exclusive_group(required=True)
     choice.add_argument("--operation-id")
@@ -829,6 +869,25 @@ def build_parser() -> JsonParser:
     return parser
 
 
+def validate_command_arguments(args):
+    revision = getattr(args, "expected_revision", None)
+    if revision is not None and revision < 1:
+        raise CliError("invalid_revision", "expected-revision must be a positive integer")
+    if args.command not in {"save", "publish"}:
+        return
+    if bool(args.dashboard_id) != (revision is not None):
+        raise CliError("invalid_publish", "dashboard-id and expected-revision must be provided together for updates")
+    version_id = getattr(args, "version_id", None)
+    if args.file:
+        if version_id:
+            raise CliError("invalid_publish", "file and version-id are mutually exclusive")
+        if not args.dashboard_id and not args.title:
+            raise CliError("invalid_publish", "new dashboards require title")
+        relative_path(args.file, "file")
+    elif not (args.dashboard_id and version_id) or args.title is not None or args.description is not None:
+        raise CliError("invalid_publish", "publishing a saved draft requires dashboard-id, version-id and expected-revision, without title/description")
+
+
 def command_action(args, transport):
     command = args.command
     values = vars(args)
@@ -839,10 +898,20 @@ def command_action(args, transport):
     if command == "source":
         relative_path(args.output, "output")
         return "dashboard.source", {"dashboard_id": args.dashboard_id, "version_id": args.version_id, "output": args.output}
-    if command == "publish":
-        if bool(args.dashboard_id) != (args.expected_revision is not None):
-            raise CliError("invalid_publish", "dashboard-id and expected-revision must be provided together for updates")
-        params = {"path": relative_path(args.file, "file"), "title": args.title, "description": args.description}
+    if command == "create":
+        return "dashboard.create", {"title": args.title, "description": args.description}
+    if command in {"save", "publish"}:
+        if not args.file:
+            return "dashboard.activate", {"dashboard_id": args.dashboard_id,
+                    "version_id": args.version_id, "expected_revision": args.expected_revision}
+        params = {"path": relative_path(args.file, "file"),
+                  "disposition": "save_draft" if command == "save" else "publish"}
+        if args.title is not None:
+            params["title"] = args.title
+        if args.description is not None:
+            params["description"] = args.description
+        elif not args.dashboard_id:
+            params["description"] = ""
         if args.dashboard_id:
             params.update({"dashboard_id": args.dashboard_id, "expected_revision": args.expected_revision})
         params = transport.freeze_publish(params, args.request_id)
@@ -1001,6 +1070,9 @@ def main(argv=None) -> int:
         if args.command == "new-request-id":
             emit({"request_id": str(uuid.uuid4())})
             return EXIT_SUCCESS
+        if getattr(args, "request_id", None):
+            args.request_id = validate_uuid(args.request_id, "request-id")
+        validate_command_arguments(args)
         # Captured before any network work: an uncertain death during
         # principal resolution or freezing still classifies as a write with
         # unknown outcome.
@@ -1015,8 +1087,6 @@ def main(argv=None) -> int:
         action, params = command_action(args, transport)
         if request_id and action == "dashboard.operation":
             request_id = None
-        if request_id:
-            request_id = validate_uuid(request_id, "request-id")
         is_write = action in WRITE_ACTIONS or action == "group.member_change"
         if is_write:
             # Verified stable principal before any write or snapshot reuse;
@@ -1030,6 +1100,9 @@ def main(argv=None) -> int:
         payload = response[0] if isinstance(response, tuple) else response
         if not isinstance(payload, dict):
             raise CliError("invalid_response", "service response must be a JSON object", EXIT_REMOTE)
+        if (is_write or action == "dashboard.operation") and payload.get("state") not in {
+                "accepted", "processing", "pending", "running", "succeeded", "failed"}:
+            raise CliError("invalid_response", "service returned an unrecognized operation state; query the original request ID", EXIT_REMOTE)
         if request_id:
             payload.setdefault("idempotency_key", request_id)
         emit(payload, secrets)
