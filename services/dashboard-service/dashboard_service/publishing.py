@@ -93,18 +93,27 @@ class Publisher:
             return staged
         operation_id, attempt_id = staged["operation_id"], staged["attempt_id"]
         uploaded = False
+        put_unknown = False
         try:
             staged_path = self.store.stage_stream(attempt_id, html_stream, content_sha, byte_size)
-            object_ref = self.store.put_verified(staged["object_key"],
-                                                 staged_path.read_bytes(), content_sha, byte_size)
+            try:
+                object_ref = self.store.put_verified(staged["object_key"],
+                                                     staged_path.read_bytes(),
+                                                     content_sha, byte_size)
+            except ApiError:
+                # The PUT may have reached S3 even though it failed here
+                # (lost response / lost read-back): the outcome is unknown,
+                # never "nothing uploaded" (R2).
+                put_unknown = True
+                raise
             staged_path.unlink(missing_ok=True)
             uploaded = True
             with self.database.transaction() as connection:
                 self.operations.mark_uploaded(connection, operation_id, attempt_id,
                                               object_ref.object_version_id)
         except ApiError as error:
-            self._settle_failed_attempt(operation_id, attempt_id, uploaded)
-            self._record_failure(operation_id, error)
+            self._settle_failed_attempt(operation_id, attempt_id, uploaded, put_unknown)
+            self._record_failure(operation_id, error, attempt_id=attempt_id)
             raise
 
         # Fresh identity right before the final transaction; the principal
@@ -122,25 +131,26 @@ class Publisher:
             except ApiError as error:
                 # The final commit legitimately failed (revocation, revision
                 # conflict, ...): settle the attempt and record the failure.
-                self._settle_failed_attempt(operation_id, attempt_id, uploaded)
-                self._record_failure(operation_id, error)
+                self._settle_failed_attempt(operation_id, attempt_id, uploaded, put_unknown)
+                self._record_failure(operation_id, error, attempt_id=attempt_id)
                 raise
             except OperationalError as error:
                 last_error = error
                 continue
         contention = ApiError(503, "database_unavailable",
                               "Database contention; retry with the same key", retryable=True)
-        self._settle_failed_attempt(operation_id, attempt_id, uploaded)
-        self._record_failure(operation_id, contention)
+        self._settle_failed_attempt(operation_id, attempt_id, uploaded, put_unknown)
+        self._record_failure(operation_id, contention, attempt_id=attempt_id)
         raise last_error  # type: ignore[misc]
 
     def _settle_failed_attempt(self, operation_id: str, attempt_id: str,
-                               uploaded: bool) -> None:
-        """After a failure: uploaded/unknown objects stay reserved and wait
-        for exact cleanup; nothing-uploaded attempts release quota now."""
+                               uploaded: bool, put_unknown: bool = False) -> None:
+        """After a failure: uploaded/unknown-outcome objects stay reserved
+        and wait for exact cleanup; attempts that never started an S3 PUT
+        release quota now. Fenced to this attempt only."""
         try:
             with self.database.transaction() as connection:
-                if uploaded:
+                if uploaded or put_unknown:
                     self.operations.mark_cleanup_pending(connection, operation_id, attempt_id)
                 else:
                     self.operations.release_reservation(connection, operation_id, attempt_id)
@@ -163,18 +173,41 @@ class Publisher:
                                     "Restore the dashboard before publishing a new version")
                             quota_owner_id = row["owner_principal_id"]
                         else:
+                            self.authorizer.check_context_validity(connection, actor)
+                            actor.requires_scope("write")
                             quota_owner_id = actor.principal_id
-                        quotas.ensure_rows(connection, quota_owner_id)
-                        quotas.check_headroom(connection, self.config, quota_owner_id,
-                                              extra_bytes=byte_size,
-                                              new_dashboard=dashboard_id is None)
+
+                        def reserve(reserve_connection):
+                            # Headroom is validated only when a NEW attempt is
+                            # about to reserve quota — replays of finished or
+                            # in-flight operations must not be blocked by a
+                            # now-full quota (R11).
+                            quotas.ensure_rows(reserve_connection, quota_owner_id)
+                            quotas.check_headroom(
+                                reserve_connection, self.config, quota_owner_id,
+                                extra_bytes=byte_size,
+                                new_dashboard=dashboard_id is None)
+
                         begun = self.operations.begin_staged(
                             connection, actor, key, action="publish", method=method, path=path,
                             target_id=dashboard_id, payload=payload,
                             new_dashboard=dashboard_id is None, byte_size=byte_size,
-                            quota_owner_id=quota_owner_id)
+                            quota_owner_id=quota_owner_id, reserve=reserve)
                         if "attempt_id" not in begun:
                             # A finished/pending wrapper, not a staged attempt.
+                            # Replays re-check CURRENT authorization first —
+                            # a revoked editor or narrowed scope must not read
+                            # the old result back (R8 semantics for staged ops).
+                            if dashboard_id is not None:
+                                current = self.authorizer.dashboard_or_none(
+                                    connection, dashboard_id)
+                                require(current is not None, 404, "not_found",
+                                        "Dashboard is not visible")
+                                self.authorizer.authorize(connection, current, actor,
+                                                          "write")
+                            else:
+                                self.authorizer.check_context_validity(connection, actor)
+                                actor.requires_scope("write")
                             if begun.get("state") == "succeeded":
                                 return PublishOutcome(begun, 200)  # recorded replay
                             return PublishOutcome(begun, 202, retry_after=2)
@@ -198,13 +231,19 @@ class Publisher:
                 reservation = self.operations.reservation(connection, operation_id, attempt_id)
                 moment = now()
                 moment_db = to_db(moment)
+                # Re-validate identity and live account state INSIDE the
+                # final transaction — both create and update paths. The
+                # out-of-transaction reverify cannot cover the window between
+                # it and this commit (R4).
+                self.authorizer.check_context_validity(connection, actor, moment=moment)
+                actor.requires_scope("write")
                 if dashboard_id != staged["dashboard_id"]:
                     dashboard_id = staged["dashboard_id"]
                 if reservation is None:
                     raise ApiError(409, "operation_lease_lost", "Reservation is missing")
                 if dashboard_id not in ("", None) and dashboard_id != reservation["dashboard_id"]:
                     dashboard_id = reservation["dashboard_id"]
-                dashboard_row = self.authorizer.dashboard_or_none(
+                dashboard_row = self.authorizer.dashboard_for_update(
                     connection, reservation["dashboard_id"])
                 if dashboard_row is not None:
                     # Update path: the dashboard exists; re-authorize with the
@@ -276,15 +315,20 @@ class Publisher:
                 wrapper = self.operations.wrap(operation_id, key, "succeeded", result, None)
                 return PublishOutcome(wrapper, 201)
 
-    def _record_failure(self, operation_id: str, error: ApiError) -> None:
+    def _record_failure(self, operation_id: str, error: ApiError, *, attempt_id: str) -> None:
+        """Record the failure BOUND TO THE ATTEMPT: a stale worker whose lease
+        was taken over matches zero rows and cannot overwrite the newer
+        attempt's in-flight or committed outcome (R3)."""
         # 5xx/timeout/contention failures are retryable with the same key;
         # 4xx input/authorization failures need a new logical request.
         retryable = error.status >= 500 or error.status in (408, 425, 429)
         try:
             with self.database.transaction() as connection:
                 with self.database.guard(connection, exclusive=False):
-                    self.operations.fail(connection, operation_id, code=error.code,
-                                         message=error.message, retryable=retryable)
-                    self.operations.release_reservation(connection, operation_id)
+                    self.operations.fail(connection, operation_id, attempt_id,
+                                         code=error.code, message=error.message,
+                                         retryable=retryable)
+                    self.operations.release_reservation(connection, operation_id,
+                                                        attempt_id)
         except Exception:  # noqa: BLE001 - failure recording must not mask the real error
             pass

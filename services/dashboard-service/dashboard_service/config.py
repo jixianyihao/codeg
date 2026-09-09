@@ -37,6 +37,10 @@ class Config:
     jwt_default_ttl_seconds: int = 30 * 86400
     operation_result_days: int = 7
     operation_lease_seconds: int = 300
+    # Cleanup waits this long after an attempt's own lease dies before
+    # settling its object: a straggling S3 PUT from the dead worker's client
+    # must have finished (bounded client timeouts) before the key is closed.
+    cleanup_grace_seconds: int = 300
     max_group_members: int = 1000
     page_size_default: int = 20
     page_size_max: int = 50

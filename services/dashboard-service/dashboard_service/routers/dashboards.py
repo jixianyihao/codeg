@@ -41,6 +41,10 @@ async def list_dashboards(request: Request, scope: str = "all", q: str = "",
     def run():
         with service.database.read_only() as connection:
             service.authorizer.check_context_validity(connection, actor)
+            if actor.principal_type == "service":
+                # Same read-scope gate as the detail endpoint: write/manage-
+                # only integration accounts must not list metadata (R9).
+                actor.requires_scope("read")
             rows, next_cursor = service.authorizer.visible_ids(
                 connection, actor, scope=scope, status=status, search=q,
                 cursor=cursor, limit=page_limit)
@@ -155,7 +159,8 @@ def patch_dashboard(dashboard_id: str, request: Request, payload: dict,
                 422, "invalid_input", "description must be at most 2000 characters")
 
     def unit(connection, operation_id):
-        row = service.authorizer.dashboard(connection, dashboard_id)
+        row = service.authorizer.dashboard_for_update(connection, dashboard_id)
+        require(row is not None, 404, "not_found", "Dashboard is not visible")
         service.authorizer.authorize(connection, row, actor, "write")
         require(row["revision"] == expected_revision, 409, "revision_conflict",
                 "Dashboard changed; read it again")
@@ -176,10 +181,14 @@ def patch_dashboard(dashboard_id: str, request: Request, payload: dict,
                      operation_id=operation_id)
         return {"dashboard_id": dashboard_id, "revision": row["revision"] + 1}
 
+    def replay_check(connection):
+        current = service.authorizer.dashboard(connection, dashboard_id)
+        service.authorizer.authorize(connection, current, actor, "write")
+
     return service.operations.run_sync(
         actor, key, action="patch", method="PATCH",
         path=f"/api/v1/dashboards/{dashboard_id}", target_id=dashboard_id,
-        payload=payload, exclusive_guard=False, unit=unit,
+        payload=payload, exclusive_guard=False, unit=unit, replay_check=replay_check,
         trace_id=getattr(request.state, "trace_id", "local"))
 
 
@@ -264,7 +273,8 @@ def rollback(dashboard_id: str, request: Request, payload: dict,
             "expected_revision is required")
 
     def unit(connection, operation_id):
-        row = service.authorizer.dashboard(connection, dashboard_id)
+        row = service.authorizer.dashboard_for_update(connection, dashboard_id)
+        require(row is not None, 404, "not_found", "Dashboard is not visible")
         service.authorizer.authorize(connection, row, actor, "write")
         require(row["status"] == "published", 409, "invalid_input",
                 "Restore the dashboard before rolling back")
@@ -295,10 +305,14 @@ def rollback(dashboard_id: str, request: Request, payload: dict,
                 "sha256": version["sha256"],
                 "view_url": f"{service.config.control_origin}/dashboards/{dashboard_id}"}
 
+    def replay_check(connection):
+        current = service.authorizer.dashboard(connection, dashboard_id)
+        service.authorizer.authorize(connection, current, actor, "write")
+
     return service.operations.run_sync(
         actor, key, action="rollback", method="POST",
         path=f"/api/v1/dashboards/{dashboard_id}/rollback", target_id=dashboard_id,
-        payload=payload, exclusive_guard=False, unit=unit,
+        payload=payload, exclusive_guard=False, unit=unit, replay_check=replay_check,
         trace_id=getattr(request.state, "trace_id", "local"))
 
 
@@ -324,7 +338,8 @@ def _status_change(dashboard_id, request, actor, payload, target_status):
     action = "dashboard.archive" if target_status == "archived" else "dashboard.restore"
 
     def unit(connection, operation_id):
-        row = service.authorizer.dashboard(connection, dashboard_id)
+        row = service.authorizer.dashboard_for_update(connection, dashboard_id)
+        require(row is not None, 404, "not_found", "Dashboard is not visible")
         service.authorizer.authorize(connection, row, actor, "manage")
         require(row["revision"] == expected_revision, 409, "revision_conflict",
                 "Dashboard changed; read it again")
@@ -341,8 +356,13 @@ def _status_change(dashboard_id, request, actor, payload, target_status):
                      operation_id=operation_id)
         return {"dashboard_id": dashboard_id, "revision": revision, "status": target_status}
 
+    def replay_check(connection):
+        current = service.authorizer.dashboard(connection, dashboard_id)
+        service.authorizer.authorize(connection, current, actor, "manage")
+
     return service.operations.run_sync(
         actor, key, action=action, method="POST",
         path=f"/api/v1/dashboards/{dashboard_id}/{'archive' if target_status == 'archived' else 'restore'}",
         target_id=dashboard_id, payload=payload, exclusive_guard=False, unit=unit,
+        replay_check=replay_check,
         trace_id=getattr(request.state, "trace_id", "local"))

@@ -34,9 +34,10 @@ CONTROL_PAGE_CSP = (
 
 
 class RequestGuards:
-    """Trace ids, no-store on dynamic responses, and hard body caps that do
-    not trust Content-Length (the true multipart byte count is enforced
-    while streaming in storage.stage_stream)."""
+    """Trace ids, no-store on dynamic responses, and hard body caps enforced
+    on the bytes actually received — a declared Content-Length is only a
+    fast precheck, never the limit itself (the streaming stage re-validates
+    the true multipart byte count in storage.stage_stream)."""
 
     def __init__(self, app, config: Config):
         self.app = app
@@ -49,6 +50,7 @@ class RequestGuards:
         headers = {k.lower(): v for k, v in scope.get("headers", [])}
         is_multipart = b"multipart/form-data" in headers.get(b"content-type", b"")
         limit = self.config.max_upload_bytes + 262144 if is_multipart else 131072
+        received = 0
         state = scope.setdefault("state", {})
         state["trace_id"] = new_id()
 
@@ -64,9 +66,14 @@ class RequestGuards:
             await send(message)
 
         async def bounded_receive():
+            nonlocal received
             message = await receive()
-            if message.get("type") == "http.request" and is_multipart:
-                if int(headers.get(b"content-length", b"0") or 0) > limit:
+            if message.get("type") == "http.request":
+                # Count the ACTUAL bytes flowing through, never trusting a
+                # declared Content-Length: chunked uploads and lying headers
+                # are cut off before any parser caches them (R6).
+                received += len(message.get("body", b"") or b"")
+                if received > limit:
                     response = JSONResponse(
                         {"code": "upload_too_large", "message": "Request body exceeds limit",
                          "trace_id": state["trace_id"], "retryable": False},

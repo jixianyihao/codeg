@@ -94,8 +94,10 @@ def test_interrupted_operation_fails_and_resumes(bundle, make_service_account):
     rows = committed_version_rows(bundle, outcome.wrapper["result"]["dashboard_id"])
     assert [r[1] for r in rows] == [1]  # exactly one committed version
 
-    # The abandoned first attempt's object is still there (unique key) and
-    # exact cleanup removes it without touching the committed one.
+    # The abandoned first attempt's object is still there (unique key); the
+    # operation is now succeeded (by the retry), so cleanup may settle the
+    # superseded attempt's object. A settled key is closed by a zero-byte
+    # tombstone: no content remains, and a straggling PUT cannot resurrect it.
     assert bundle.service.store.object_exists(object_ref)
     committed_key = None
     with bundle.database.read_only() as connection:
@@ -105,7 +107,7 @@ def test_interrupted_operation_fails_and_resumes(bundle, make_service_account):
                 outcome.wrapper["result"]["dashboard_id"])).scalar_one()
     removed = bundle.service.operations.cleanup_ready_reservations(bundle.service.store)
     assert removed >= 1
-    assert not bundle.service.store.object_exists(object_ref)
+    assert not bundle.service.store.object_present(object_ref)
     assert bundle.service.store.object_exists(
         __import__("dashboard_service.storage", fromlist=["ObjectRef"]).ObjectRef(
             bucket=bundle.config.s3_bucket, key=committed_key))
@@ -202,11 +204,20 @@ def test_cleanup_never_touches_committed_objects(bundle, make_service_account, c
         bundle.service.operations.mark_uploaded(
             connection, begun["operation_id"], begun["attempt_id"],
             orphan_ref.object_version_id)
+        # The abandoned attempt must be provably non-committable before
+        # cleanup may touch it: lease dead past the grace window.
+        connection.execute(models.operations.update().where(
+            models.operations.c.id == begun["operation_id"]).values(
+            lease_until=to_db(row_now() - timedelta(seconds=3600))))
+        connection.execute(models.upload_reservations.update().where(
+            models.upload_reservations.c.operation_id == begun["operation_id"],
+            models.upload_reservations.c.attempt_id == begun["attempt_id"]
+        ).values(expires_at=to_db(row_now() - timedelta(seconds=3600))))
 
     from dashboard_service.operator import Operator
     stats = Operator(bundle.config, bundle.database).cleanup_orphan_files()
     assert stats["orphan_objects_removed"] >= 1
-    assert not bundle.service.store.object_exists(orphan_ref)
+    assert not bundle.service.store.object_present(orphan_ref)
     assert bundle.service.store.object_exists(committed_ref)  # committed survives
     # The committed object still reads correctly after cleanup ran.
     assert bundle.service.store.get_verified(

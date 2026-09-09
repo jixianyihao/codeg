@@ -39,6 +39,7 @@ def create_group(request: Request, payload: dict,
         target_id=None, payload=payload, exclusive_guard=True,
         unit=lambda connection, operation_id: service.groups.create(
             connection, actor, payload["display_name"]),
+        replay_check=lambda conn: service.authorizer.check_context_validity(conn, actor),
         trace_id=getattr(request.state, "trace_id", "local"))
 
 
@@ -71,4 +72,5 @@ def set_members(group_id: str, request: Request, payload: dict,
         actor, key, action="group.set_members", method="PUT",
         path=f"/api/v1/groups/{group_id}/members", target_id=group_id,
         payload=payload, exclusive_guard=True, unit=unit,
+        replay_check=lambda conn: service.groups.get(conn, group_id, actor),
         trace_id=getattr(request.state, "trace_id", "local"))

@@ -46,13 +46,21 @@ def _validate_subject(connection, subject_type: str, subject_id) -> str:
 
 def _time_window(current: tuple, payload: dict):
     """Merge semantics: a key omitted from the payload keeps the stored
-    value; an explicit null clears it; both endpoints validated together
-    (starts_at < expires_at)."""
+    datetime as-is; an explicit string is parsed as RFC3339; an explicit
+    null clears it; both endpoints validated together (starts_at <
+    expires_at). Only request-provided strings go through the parser (R7) —
+    stored MySQL datetimes are already UTC values."""
     stored_start, stored_end = current
-    starts = payload.get("starts_at", stored_start)
-    expires = payload.get("expires_at", stored_end)
-    starts_at = parse_rfc3339(starts, "starts_at") if starts is not None else None
-    expires_at = parse_rfc3339(expires, "expires_at") if expires is not None else None
+    if "starts_at" in payload:
+        starts_at = (parse_rfc3339(payload["starts_at"], "starts_at")
+                     if payload["starts_at"] is not None else None)
+    else:
+        starts_at = stored_start
+    if "expires_at" in payload:
+        expires_at = (parse_rfc3339(payload["expires_at"], "expires_at")
+                      if payload["expires_at"] is not None else None)
+    else:
+        expires_at = stored_end
     require(starts_at is None or expires_at is None or starts_at < expires_at, 422,
             "invalid_time", "starts_at must be before expires_at")
     return starts_at, expires_at
@@ -145,7 +153,9 @@ def post_grant(dashboard_id: str, request: Request, payload: dict,
     return service.operations.run_sync(
         actor, key, action="grant.upsert", method="POST",
         path=f"/api/v1/dashboards/{dashboard_id}/grants", target_id=dashboard_id,
-        payload=payload, exclusive_guard=True, unit=unit, trace_id=trace_id)
+        payload=payload, exclusive_guard=True, unit=unit,
+        replay_check=lambda conn: _load_dashboard(conn, service, dashboard_id, actor),
+        trace_id=trace_id)
 
 
 @router.delete("/dashboards/{dashboard_id}/grants/{subject_type}/{subject_id}")
@@ -188,7 +198,9 @@ def delete_grant(dashboard_id: str, subject_type: str, subject_id: str, request:
         actor, key, action="grant.delete", method="DELETE",
         path=f"/api/v1/dashboards/{dashboard_id}/grants/{subject_type}/{subject_id}",
         target_id=dashboard_id, payload={"expected_revision": expected_revision},
-        exclusive_guard=True, unit=unit, trace_id=trace_id)
+        exclusive_guard=True, unit=unit,
+        replay_check=lambda conn: _load_dashboard(conn, service, dashboard_id, actor),
+        trace_id=trace_id)
 
 
 @router.put("/dashboards/{dashboard_id}/public-access")
@@ -233,7 +245,9 @@ def put_public_access(dashboard_id: str, request: Request, payload: dict,
     return service.operations.run_sync(
         actor, key, action="public_access", method="PUT",
         path=f"/api/v1/dashboards/{dashboard_id}/public-access", target_id=dashboard_id,
-        payload=payload, exclusive_guard=True, unit=unit, trace_id=trace_id)
+        payload=payload, exclusive_guard=True, unit=unit,
+        replay_check=lambda conn: _load_dashboard(conn, service, dashboard_id, actor),
+        trace_id=trace_id)
 
 
 @router.post("/dashboards/{dashboard_id}/access-changes")
@@ -315,7 +329,9 @@ def access_changes(dashboard_id: str, request: Request, payload: dict,
     return service.operations.run_sync(
         actor, key, action="access_changes", method="POST",
         path=f"/api/v1/dashboards/{dashboard_id}/access-changes", target_id=dashboard_id,
-        payload=payload, exclusive_guard=True, unit=unit, trace_id=trace_id)
+        payload=payload, exclusive_guard=True, unit=unit,
+        replay_check=lambda conn: _load_dashboard(conn, service, dashboard_id, actor),
+        trace_id=trace_id)
 
 
 @router.get("/dashboards/{dashboard_id}/access")

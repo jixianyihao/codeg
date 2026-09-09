@@ -83,6 +83,14 @@ class Authorizer:
             select(models.dashboards).where(models.dashboards.c.id == dashboard_id)
         ).mappings().one_or_none()
 
+    def dashboard_for_update(self, connection, dashboard_id: str):
+        """Write-path read: locks the dashboard row so two concurrent writers
+        serialize here — the second one re-reads the post-commit revision and
+        fails its expected_revision check instead of overwriting (R5)."""
+        return connection.execute(
+            select(models.dashboards).where(models.dashboards.c.id == dashboard_id)
+            .with_for_update()).mappings().one_or_none()
+
     def group_ids_of(self, connection, principal_id: str) -> set[str]:
         return {
             row[0] for row in connection.execute(

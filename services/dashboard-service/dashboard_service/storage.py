@@ -115,7 +115,13 @@ class ContentStore:
     def put_verified(self, key: str, data: bytes, expected_sha256: str,
                      expected_size: int) -> ObjectRef:
         """Conditional create + read-back verification. Returns the committed
-        object reference only after the stored bytes match the digest."""
+        object reference only after the stored bytes match the digest.
+
+        A PreconditionFailed answer usually means this attempt's own PUT
+        already landed and the response was lost (client retry): verify the
+        stored bytes instead of failing — the per-attempt key is never shared
+        with another writer. Anything else under that key is corruption.
+        """
         bucket = self.config.s3_bucket
         try:
             self._client.put_object(
@@ -127,6 +133,10 @@ class ContentStore:
         except botocore.exceptions.ClientError as error:
             code = error.response.get("Error", {}).get("Code", "")
             if code in ("PreconditionFailed", "ConditionalRequestConflict"):
+                stored = self._get_bytes(bucket, key, None)
+                if (len(stored) == expected_size
+                        and hashlib.sha256(stored).hexdigest() == expected_sha256):
+                    return ObjectRef(bucket=bucket, key=key)  # idempotent retry
                 raise _storage_unavailable("Object already exists") from None
             raise _storage_unavailable() from None
         except botocore.exceptions.BotoCoreError:
@@ -150,8 +160,31 @@ class ContentStore:
         return self.get_verified(ref, version_row["sha256"], version_row["byte_size"])
 
     def delete_orphan(self, ref: ObjectRef) -> bool:
-        """Precise delete of a never-committed attempt object."""
-        return self._safe_delete(ref.bucket, ref.key, ref.object_version_id)
+        """Settle a never-committed attempt key. A zero-byte tombstone is
+        placed with IfNoneMatch first: placement success proves the object is
+        absent AND closes the key against a straggling late PUT from the dead
+        attempt's client. The tombstone stays forever — per-attempt keys are
+        never reused. Returns True only once settled."""
+        for _ in range(2):
+            try:
+                self._client.put_object(
+                    Bucket=ref.bucket, Key=ref.key, Body=b"",
+                    IfNoneMatch="*",
+                    ContentType="application/octet-stream",
+                    Metadata={"orphan-tombstone": "1"},
+                )
+                return True  # proven absent; late PUTs now fail closed
+            except botocore.exceptions.ClientError as error:
+                code = error.response.get("Error", {}).get("Code", "")
+                if code not in ("PreconditionFailed", "ConditionalRequestConflict"):
+                    return False
+                # The orphan (or a late PUT) is present: remove it and place
+                # the tombstone again in the next iteration.
+                if not self._safe_delete(ref.bucket, ref.key, ref.object_version_id):
+                    return False
+            except botocore.exceptions.BotoCoreError:
+                return False
+        return False
 
     def object_exists(self, ref: ObjectRef) -> bool:
         try:
@@ -166,6 +199,22 @@ class ContentStore:
             raise _storage_unavailable() from None
         except botocore.exceptions.BotoCoreError:
             raise _storage_unavailable() from None
+
+    def object_present(self, ref: ObjectRef) -> bool:
+        """True when real content sits at the key. A settled tombstone
+        (zero bytes) counts as absent."""
+        try:
+            head = self._client.head_object(
+                Bucket=ref.bucket, Key=ref.key,
+                **({"VersionId": ref.object_version_id} if ref.object_version_id else {}))
+        except botocore.exceptions.ClientError as error:
+            status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if status == 404:
+                return False
+            raise _storage_unavailable() from None
+        except botocore.exceptions.BotoCoreError:
+            raise _storage_unavailable() from None
+        return int(head.get("ContentLength") or 0) > 0
 
     def probe(self) -> dict:
         """Readiness check for /health/ready."""

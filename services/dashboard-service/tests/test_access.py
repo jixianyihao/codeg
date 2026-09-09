@@ -337,3 +337,102 @@ def test_public_grant_role_forced_viewer(client, owner_setup):
     response = _grant(client, owner_token, created["dashboard_id"], "all_authenticated",
                       "*", "editor")
     assert response.status_code == 422
+
+
+# ------------------------------------------------------- R7/R8/R9 fixes
+
+def test_timed_grant_role_change_keeps_window(client, owner_setup, make_human):
+    """R7: changing only the role of an already-timed grant preserves the
+    stored starts_at/expires_at instead of choking on the stored datetime."""
+    owner_token, created = owner_setup
+    dashboard_id = created["dashboard_id"]
+    editor_token = make_human("editor-window")
+    editor_id = client.get("/api/v1/me", headers=human_headers(editor_token)).json()["principal_id"]
+    expires = "2027-01-01T00:00:00Z"
+    granted = _grant(client, owner_token, dashboard_id, "user", editor_id, "viewer",
+                     expected_revision=1, expires_at=expires)
+    assert granted.status_code == 200, granted.text
+
+    # Role-only change: no time fields in the payload.
+    promoted = _grant(client, owner_token, dashboard_id, "user", editor_id, "editor",
+                      expected_revision=2)
+    assert promoted.status_code == 200, promoted.text
+    grants = client.get(f"/api/v1/dashboards/{dashboard_id}/grants",
+                        headers=human_headers(owner_token)).json()["items"]
+    mine = [g for g in grants if g["subject_id"] == editor_id]
+    assert mine and mine[0]["role"] == "editor"
+    assert mine[0]["expires_at"] == expires  # window preserved
+
+    # One boundary change only: keep the role, move the expiry.
+    later = "2028-06-01T00:00:00Z"
+    moved = _grant(client, owner_token, dashboard_id, "user", editor_id, "editor",
+                   expected_revision=3, expires_at=later)
+    assert moved.status_code == 200, moved.text
+    grants = client.get(f"/api/v1/dashboards/{dashboard_id}/grants",
+                        headers=human_headers(owner_token)).json()["items"]
+    mine = [g for g in grants if g["subject_id"] == editor_id]
+    assert mine[0]["expires_at"] == later
+
+    # Explicit null clears the boundary (distinct from omitting it).
+    cleared = _grant(client, owner_token, dashboard_id, "user", editor_id, "editor",
+                     expected_revision=4, expires_at=None)
+    assert cleared.status_code == 200, cleared.text
+    grants = client.get(f"/api/v1/dashboards/{dashboard_id}/grants",
+                        headers=human_headers(owner_token)).json()["items"]
+    mine = [g for g in grants if g["subject_id"] == editor_id]
+    assert mine[0]["expires_at"] is None
+
+
+def test_revoked_editor_cannot_replay_stored_success(client, owner_setup, make_human):
+    """R8: a recorded write result is only replayed after re-checking the
+    caller's CURRENT authorization."""
+    owner_token, created = owner_setup
+    dashboard_id = created["dashboard_id"]
+    editor_token = make_human("editor-replay")
+    editor_id = client.get("/api/v1/me", headers=human_headers(editor_token)).json()["principal_id"]
+    assert _grant(client, owner_token, dashboard_id, "user", editor_id, "editor").status_code == 200
+
+    key = str(uuid.uuid4())
+    first = client.patch(
+        f"/api/v1/dashboards/{dashboard_id}",
+        headers={**human_headers(editor_token), "Idempotency-Key": key},
+        json={"title": "by editor", "expected_revision": 2})
+    assert first.status_code == 200
+    assert first.json()["state"] == "succeeded"
+
+    # Same key + same request replays while access is intact.
+    replay_ok = client.patch(
+        f"/api/v1/dashboards/{dashboard_id}",
+        headers={**human_headers(editor_token), "Idempotency-Key": key},
+        json={"title": "by editor", "expected_revision": 2})
+    assert replay_ok.status_code == 200
+    assert replay_ok.json()["state"] == "succeeded"
+
+    # Owner revokes the editor; the identical replay must now be denied —
+    # the stored success is NOT handed back.
+    assert client.delete(
+        f"/api/v1/dashboards/{dashboard_id}/grants/user/{editor_id}?expected_revision=3",
+        headers={**human_headers(owner_token), "Idempotency-Key": str(uuid.uuid4())}
+    ).status_code == 200
+    denied = client.patch(
+        f"/api/v1/dashboards/{dashboard_id}",
+        headers={**human_headers(editor_token), "Idempotency-Key": key},
+        json={"title": "by editor", "expected_revision": 2})
+    assert denied.status_code == 404
+    assert denied.json().get("state") != "succeeded"
+
+
+def test_write_only_service_scope_cannot_list_dashboards(client, operator,
+                                                         make_service_account):
+    """R9: the list endpoint applies the same read-scope gate as details."""
+    principal_id, token = make_service_account("scope-list",
+                                               scopes=("write", "manage"))
+    listed = client.get("/api/v1/dashboards", headers=service_headers(token))
+    assert listed.status_code == 403
+    assert listed.json()["code"] == "action_forbidden"
+
+    # A read-capable account lists fine (empty is correct: private boards).
+    _, reader = make_service_account("scope-list-reader", scopes=("read",))
+    ok = client.get("/api/v1/dashboards", headers=service_headers(reader))
+    assert ok.status_code == 200
+    assert ok.json()["items"] == []

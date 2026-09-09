@@ -77,12 +77,17 @@ class Operations:
 
     def run_sync(self, actor: AuthContext, key: str, *, action: str, method: str, path: str,
                  target_id: str | None, payload, exclusive_guard: bool, unit,
-                 trace_id: str = "local") -> dict:
+                 trace_id: str = "local", replay_check=None) -> dict:
         """Single-transaction write: occupy the key, execute, commit result.
 
         `unit(connection, operation_id) -> result` performs the business
         change; it must raise ApiError on failure (the whole transaction
         rolls back, including the operation row).
+
+        `replay_check(connection)` re-validates the caller's CURRENT right to
+        perform the action before a recorded result is replayed — a caller
+        whose access or scope was revoked after the original success gets the
+        authorization error, never the stored result (R8).
         """
         fingerprint = request_hash(method, path, payload)
         attempt = new_id()
@@ -91,6 +96,8 @@ class Operations:
             with self.database.guard(connection, exclusive=exclusive_guard):
                 existing = self.find(connection, actor.principal_id, key)
                 if existing is not None:
+                    if replay_check is not None:
+                        replay_check(connection)  # raises on revoked access
                     return self._existing_outcome(existing, fingerprint)
                 self.check_rate(connection, actor.principal_id)
                 operation_id = new_id()
@@ -123,7 +130,8 @@ class Operations:
     def begin_staged(self, connection, actor: AuthContext, key: str, *, action: str,
                      method: str, path: str, target_id: str | None, payload,
                      new_dashboard: bool, byte_size: int,
-                     quota_owner_id: str | None = None) -> dict:
+                     quota_owner_id: str | None = None,
+                     reserve=None) -> dict:
         """Occupy the key and reserve quota for a staged publish.
 
         Returns a dict describing the attempt (operation_id, attempt_id,
@@ -131,30 +139,50 @@ class Operations:
         wrapper dict to return to the caller (202 / replayed result).
         Object coordinates are fixed here so S3 keys are deterministic and
         never collide between attempts.
+
+        `reserve(connection)` validates quota headroom inside this
+        transaction and is invoked ONLY when a new attempt is about to
+        reserve quota — never on the replay paths, so a full-quota owner can
+        still replay a finished result (R11).
         """
         from .storage import build_object_key
         fingerprint = request_hash(method, path, payload)
         existing = self.find(connection, actor.principal_id, key)
         if existing is not None:
-            if existing["state"] == "succeeded":
-                # Same key + same hash replays the recorded result.
-                return self._existing_outcome(existing, fingerprint)
+            # Every branch below first proves the request matches the key.
+            require(existing["request_hash"] == fingerprint, 409,
+                    "idempotency_conflict",
+                    "This idempotency key was used for a different request")
             if existing["state"] in ("accepted", "processing"):
                 lease = from_db(existing["lease_until"])
                 if lease is not None and lease > now():
                     return self.get_wrapper(existing)  # caller turns this into 202
-                # Stale lease: recover it now so the retry can proceed.
+                # Stale lease: recover it now so the retry can proceed, then
+                # branch on the FRESH row (the in-memory snapshot is stale).
                 self._fail_interrupted(connection, existing)
+                existing = self.find(connection, actor.principal_id, key)
+            if existing["state"] != "failed":
+                # Succeeded replays and purged results follow the shared path.
+                return self._existing_outcome(existing, fingerprint)
             # failed state (or freshly interrupted): only a retryable
             # interrupted failure may resume under the same key.
-            wrapper = self._existing_outcome(existing, fingerprint)
-            require(wrapper["state"] == "failed" and (wrapper["error"] or {}).get("retryable"),
-                    409, "idempotency_conflict",
+            error = existing["error"] or {}
+            require(error.get("retryable"), 409, "idempotency_conflict",
                     "This idempotency key already completed; use a new key for a new operation")
-            connection.execute(models.operations.update().where(
-                models.operations.c.id == existing["id"]).values(
-                state="accepted", request_hash=fingerprint, updated_at=to_db(now())))
             operation_id, attempt = existing["id"], new_id()
+            moment = now()
+            lease_until = moment + timedelta(seconds=self.config.operation_lease_seconds)
+            # Fence the resume: only the transaction that flips failed →
+            # accepted owns the new attempt. A concurrent same-key retry that
+            # loses the race sees the winner's pending state.
+            resumed = connection.execute(models.operations.update().where(
+                models.operations.c.id == operation_id,
+                models.operations.c.state == "failed").values(
+                state="accepted", attempt_id=attempt, request_hash=fingerprint,
+                lease_until=to_db(lease_until), updated_at=to_db(moment))).rowcount
+            if not resumed:
+                fresh = self.find(connection, actor.principal_id, key)
+                return self.get_wrapper(fresh)  # the winner's 202 wrapper
             self.release_reservation(connection, operation_id)
         else:
             self.check_rate(connection, actor.principal_id)
@@ -166,6 +194,8 @@ class Operations:
                                       version_id, attempt)
         moment = now()
         lease_until = moment + timedelta(seconds=self.config.operation_lease_seconds)
+        if reserve is not None:
+            reserve(connection)  # raises quota_exceeded before any reservation
         for scope, owner in (("global", "*"), ("owner", quota_owner)):
             connection.execute(models.quota_usage.insert().prefix_with("IGNORE").values(
                 scope=scope, owner_id=owner, used_bytes=0, reserved_bytes=0,
@@ -229,17 +259,18 @@ class Operations:
 
     def release_reservation(self, connection, operation_id: str,
                             attempt_id: str | None = None) -> None:
-        """Release quota for attempts that never uploaded an object.
-        Uploaded/unknown attempts stay reserved until the object is verified
-        deleted by cleanup (contracts.md section 9)."""
+        """Release quota ONLY for attempts that never started an S3 PUT
+        (state `reserved`). Uploaded, unknown-outcome and cleanup-pending
+        attempts keep their rows and quota until the exact object cleanup
+        settles them (contracts.md section 9); committed rows are never
+        touched here."""
         statement = select(models.upload_reservations).where(
-            models.upload_reservations.c.operation_id == operation_id)
+            models.upload_reservations.c.operation_id == operation_id,
+            models.upload_reservations.c.state == "reserved")
         if attempt_id is not None:
             statement = statement.where(
                 models.upload_reservations.c.attempt_id == attempt_id)
         for reservation in connection.execute(statement).mappings().all():
-            if reservation["state"] == "uploaded":
-                continue  # object may exist; only cleanup may release it
             self._release_quota(connection, reservation)
             connection.execute(models.upload_reservations.delete().where(
                 models.upload_reservations.c.operation_id == reservation["operation_id"],
@@ -257,6 +288,11 @@ class Operations:
         reservation = self.reservation(connection, operation_id, attempt_id)
         if reservation is None:
             raise ApiError(409, "operation_lease_lost", "Reservation is missing")
+        if reservation["state"] != "uploaded":
+            # Cleanup fenced this attempt between the upload and the final
+            # transaction — the object may already be gone.
+            raise ApiError(409, "operation_lease_lost",
+                           "The attempt is no longer committable")
         connection.execute(models.upload_reservations.update().where(
             models.upload_reservations.c.operation_id == operation_id,
             models.upload_reservations.c.attempt_id == attempt_id).values(
@@ -272,9 +308,16 @@ class Operations:
                 reserved_count=models.quota_usage.c.reserved_count - count_delta))
 
     def cleanup_ready_reservations(self, store) -> int:
-        """Operator path: delete objects of non-committed attempts, then
-        release their quota and drop the rows. Committed objects are never
-        touched."""
+        """Operator path: settle never-committed attempt objects, then release
+        their quota and drop the rows.
+
+        Fencing (R1): a candidate is only settled after a MySQL transaction
+        locks the operation row and proves this attempt can no longer commit
+        (terminal operation, superseded attempt, or a lease that expired past
+        the grace window — a live lease means the worker may still run its
+        final transaction). Only then is S3 touched, outside the transaction.
+        Committed objects are never addressed.
+        """
         cleaned = 0
         with self.database.read_only() as connection:
             rows = connection.execute(
@@ -285,10 +328,12 @@ class Operations:
             ).mappings().all()
         for row in rows:
             from .storage import ObjectRef
+            if not self._attempt_settleable(row):
+                continue  # may still commit; never touch its object
             ref = ObjectRef(bucket=row["storage_bucket"], key=row["storage_key"],
                             object_version_id=row["object_version_id"])
-            deleted = store.delete_orphan(ref)
-            if not deleted:
+            settled = store.delete_orphan(ref)
+            if not settled:
                 continue  # retry next pass; never release unverified storage
             with self.database.transaction() as connection:
                 with self.database.guard(connection, exclusive=False):
@@ -306,9 +351,49 @@ class Operations:
                     cleaned += 1
         return cleaned
 
+    def _attempt_settleable(self, row) -> bool:
+        """Inside a guarded transaction: True when this attempt provably
+        cannot commit anymore AND its dead worker's S3 client has had time to
+        finish (grace), so a straggling late PUT cannot resurrect the key."""
+        with self.database.transaction() as connection:
+            with self.database.guard(connection, exclusive=False):
+                operation = connection.execute(
+                    select(models.operations.c.state, models.operations.c.attempt_id,
+                           models.operations.c.lease_until, models.operations.c.error)
+                    .where(models.operations.c.id == row["operation_id"])
+                    .with_for_update()).mappings().one_or_none()
+                fresh = connection.execute(
+                    select(models.upload_reservations.c.state).where(
+                        models.upload_reservations.c.operation_id == row["operation_id"],
+                        models.upload_reservations.c.attempt_id == row["attempt_id"])
+                ).mappings().one_or_none()
+                if fresh is None or fresh["state"] == "committed":
+                    return False
+                if operation is None:
+                    # Orphaned reference without an operation row: settle only
+                    # after the reservation's own expiry plus grace.
+                    return from_db(row["expires_at"]) is not None and \
+                        from_db(row["expires_at"]) < now() - timedelta(
+                            seconds=self.config.cleanup_grace_seconds)
+                if operation["state"] == "succeeded":
+                    return True  # worker finished; leftover row is a leftover
+                if operation["state"] == "failed":
+                    error = operation["error"] or {}
+                    if error.get("code") != "operation_interrupted":
+                        return True  # worker recorded its own post-S3 failure
+                # accepted/processing with a superseded attempt, or an
+                # interrupted failure: the dead worker's PUT may still be in
+                # flight — wait out the grace window anchored at THIS
+                # attempt's own lease (the operation row's lease belongs to
+                # whichever attempt currently owns the key).
+                own_lease = from_db(row["expires_at"])
+                return own_lease is not None and own_lease < now() - timedelta(
+                    seconds=self.config.cleanup_grace_seconds)
+
     def _fail_interrupted(self, connection, row) -> None:
         connection.execute(models.operations.update().where(
-            models.operations.c.id == row["id"]).values(
+            models.operations.c.id == row["id"],
+            models.operations.c.state.in_(("accepted", "processing"))).values(
             state="failed",
             error={"code": "operation_interrupted", "message":
                    "The operation was interrupted before commit; retry with the same key",
@@ -330,10 +415,15 @@ class Operations:
             raise ApiError(409, "operation_lease_lost",
                            "Another worker took over this operation")
 
-    def fail(self, connection, operation_id: str, *, code: str, message: str,
-             retryable: bool) -> None:
+    def fail(self, connection, operation_id: str, attempt_id: str, *, code: str,
+             message: str, retryable: bool) -> None:
+        """Record a failure for ONE attempt. The update is bound to the
+        attempt and to non-terminal states, so a stale worker can never
+        overwrite a newer attempt's in-flight or already-committed result."""
         connection.execute(models.operations.update().where(
-            models.operations.c.id == operation_id).values(
+            models.operations.c.id == operation_id,
+            models.operations.c.attempt_id == attempt_id,
+            models.operations.c.state.in_(("accepted", "processing"))).values(
             state="failed", lease_until=None,
             error={"code": code, "message": message, "retryable": retryable},
             updated_at=to_db(now())))
