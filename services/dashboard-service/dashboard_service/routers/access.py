@@ -1,11 +1,11 @@
 """Per-dashboard ACL (contracts.md §4). All grant writes take the exclusive
 authorization guard so they serialize cleanly against publishes."""
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, func, select
 
 from .. import models
 from ..authn import AuthContext
-from ..database import record_audit, to_db
+from ..database import from_db, record_audit, to_db
 from ..errors import now, parse_rfc3339, require, require_uuid
 from ..operations import validate_idempotency_key
 from . import Service, get_actor, get_service, grant_view
@@ -50,7 +50,7 @@ def _time_window(current: tuple, payload: dict):
     null clears it; both endpoints validated together (starts_at <
     expires_at). Only request-provided strings go through the parser (R7) —
     stored MySQL datetimes are already UTC values."""
-    stored_start, stored_end = current
+    stored_start, stored_end = (from_db(value) for value in current)
     if "starts_at" in payload:
         starts_at = (parse_rfc3339(payload["starts_at"], "starts_at")
                      if payload["starts_at"] is not None else None)
@@ -74,12 +74,29 @@ async def list_grants(dashboard_id: str, request: Request,
     def run():
         with service.database.read_only() as connection:
             row = _load_dashboard(connection, service, require_uuid(dashboard_id), actor)
+            grant_table = models.dashboard_grants
+            # Resolve only this dashboard's saved subjects under the existing
+            # owner/manage gate. Outer joins retain stale ACL references.
+            subjects = grant_table.outerjoin(models.principals, and_(
+                grant_table.c.subject_type == "user",
+                grant_table.c.subject_id == models.principals.c.id,
+                models.principals.c.type == "human")).outerjoin(models.service_accounts, and_(
+                grant_table.c.subject_type == "service",
+                grant_table.c.subject_id == models.service_accounts.c.principal_id
+            )).outerjoin(models.groups, and_(
+                grant_table.c.subject_type == "group",
+                grant_table.c.subject_id == models.groups.c.id))
             grants = connection.execute(
-                select(models.dashboard_grants).where(
-                    models.dashboard_grants.c.dashboard_id == row["id"])
-                .order_by(models.dashboard_grants.c.subject_type,
-                          models.dashboard_grants.c.subject_id)).mappings().all()
-            return {"items": [grant_view(g) for g in grants], "revision": row["revision"]}
+                select(grant_table, func.coalesce(
+                    models.principals.c.display_name, models.service_accounts.c.name,
+                    models.groups.c.display_name, grant_table.c.subject_id
+                ).label("subject_name")).select_from(subjects).where(
+                    grant_table.c.dashboard_id == row["id"])
+                .order_by(grant_table.c.subject_type,
+                          grant_table.c.subject_id)).mappings().all()
+            return {"items": [{**grant_view(g),
+                               "subject_name": g["subject_name"] or g["subject_id"]}
+                              for g in grants], "revision": row["revision"]}
 
     from starlette.concurrency import run_in_threadpool
     return await run_in_threadpool(run)
@@ -346,7 +363,6 @@ async def get_access(dashboard_id: str, request: Request, subject_id: str | None
             row = service.authorizer.dashboard(connection, require_uuid(dashboard_id))
             if subject_id is not None:
                 service.authorizer.authorize(connection, row, actor, "manage")
-                from ..errors import is_uuid
                 from ..authn import AuthContext as Ctx
                 target_type = ("human" if connection.execute(
                     select(models.principals.c.id).where(

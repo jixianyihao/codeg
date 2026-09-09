@@ -184,6 +184,55 @@ def test_service_grant_only_matches_service_principal(client, owner_setup, make_
                       headers=human_headers(human)).status_code == 404
 
 
+def test_grant_list_resolves_names_and_retains_unresolved_subjects(
+        client, owner_setup, make_human, make_service_account, bundle):
+    from sqlalchemy import delete
+
+    from dashboard_service import models
+
+    owner_token, created = owner_setup
+    dashboard_id = created["dashboard_id"]
+    reader_token = make_human("named-reader", "Avery Reader")
+    reader_id = client.get("/api/v1/me", headers=human_headers(reader_token)).json()["principal_id"]
+    machine_id, _ = make_service_account("finance-publisher", ("read",))
+    group_response = client.post(
+        "/api/v1/groups",
+        headers={**human_headers(owner_token), "Idempotency-Key": str(uuid.uuid4())},
+        json={"display_name": "Finance Team"})
+    assert group_response.status_code == 200, group_response.text
+    group_id = group_response.json()["result"]["group_id"]
+    subjects = [("user", reader_id), ("service", machine_id), ("group", group_id),
+                ("all_authenticated", "*")]
+    for revision, (subject_type, subject_id) in enumerate(subjects, start=1):
+        response = _grant(client, owner_token, dashboard_id, subject_type, subject_id,
+                          expected_revision=revision)
+        assert response.status_code == 200, response.text
+    # A service's identity display label is not its canonical account name.
+    with bundle.database.transaction() as connection:
+        connection.execute(models.principals.update().where(
+            models.principals.c.id == machine_id).values(display_name="Machine alias"))
+
+    path = f"/api/v1/dashboards/{dashboard_id}/grants"
+    response = client.get(path, headers=human_headers(owner_token))
+    assert response.status_code == 200, response.text
+    assert response.json()["revision"] == 5
+    names = {(item["subject_type"], item["subject_id"]): item["subject_name"]
+             for item in response.json()["items"]}
+    assert names == {("user", reader_id): "Avery Reader",
+                     ("service", machine_id): "finance-publisher",
+                     ("group", group_id): "Finance Team",
+                     ("all_authenticated", "*"): "*"}
+    assert client.get(path, headers=human_headers(reader_token)).status_code == 403
+
+    # Historical ACL references still render when their local subject is gone.
+    with bundle.database.transaction() as connection:
+        connection.execute(delete(models.groups).where(models.groups.c.id == group_id))
+    items = client.get(path, headers=human_headers(owner_token)).json()["items"]
+    unresolved = next(item for item in items if item["subject_type"] == "group")
+    assert unresolved["subject_id"] == group_id
+    assert unresolved["subject_name"] == group_id
+
+
 def test_history_shares_current_acl(client, owner_setup, make_human):
     owner_token, created = owner_setup
     dashboard_id = created["dashboard_id"]
@@ -233,6 +282,14 @@ def test_archive_blocks_reads_owner_can_restore(client, owner_setup, make_human)
         headers={**human_headers(owner_token), "Idempotency-Key": str(uuid.uuid4())},
         json={"expected_revision": 3})
     assert restored.status_code == 200
+    assert restored.json()["result"]["status"] == "draft"
+    assert client.get(f"/api/v1/dashboards/{dashboard_id}",
+                      headers=human_headers(reader)).status_code == 404
+    republished = client.post(
+        f"/api/v1/dashboards/{dashboard_id}/publish",
+        headers={**human_headers(owner_token), "Idempotency-Key": str(uuid.uuid4())},
+        json={"expected_revision": 4, "version_id": created["version_id"]})
+    assert republished.status_code == 200
     assert client.get(f"/api/v1/dashboards/{dashboard_id}",
                       headers=human_headers(reader)).status_code == 200
 

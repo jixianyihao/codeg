@@ -8,7 +8,7 @@ owner-visible only.
 """
 from dataclasses import dataclass
 
-from sqlalchemy import Select, and_, exists, or_, select
+from sqlalchemy import Select, exists, or_, select
 
 from . import models
 from .authn import AuthContext
@@ -60,7 +60,7 @@ def _combine(role_rows: list) -> AccessOutcome:
     if any(r.expires_at is None for r in top_sources):
         expires = None
     else:
-        expires = from_db(min(r.expires_at for r in top_sources))
+        expires = from_db(max(r.expires_at for r in top_sources))
     expires_text = _iso(expires)
     return AccessOutcome(role, tuple(_source(r) for r in role_rows), expires_text)
 
@@ -118,6 +118,9 @@ class Authorizer:
         matched = []
         for grant in grants:
             subject_type = grant["subject_type"]
+            if dashboard_row["status"] == "draft" and (
+                    subject_type == "all_authenticated" or grant["role"] != "editor"):
+                continue
             applies = (
                 (subject_type == "user" and actor.principal_type == "human"
                  and grant["subject_id"] == actor.principal_id)
@@ -175,18 +178,29 @@ class Authorizer:
                 "This action requires a higher dashboard role")
         return access
 
+    def authorize_publication(self, connection, dashboard_row, actor: AuthContext,
+                              *, moment=None) -> AccessOutcome:
+        access = self.authorize(connection, dashboard_row, actor, "write", moment=moment)
+        require(dashboard_row["status"] != "archived", 409, "invalid_input",
+                "Restore the dashboard to draft before changing content")
+        if dashboard_row["status"] != "published":
+            require(access.role == "owner", 403, "action_forbidden",
+                    "Only the owner can publish a draft dashboard")
+        return access
+
+    @staticmethod
+    def version_visible(dashboard_row, version, access: AccessOutcome) -> bool:
+        """Unpublished history stays private even after its draft pointer moves."""
+        return (dashboard_row["status"] != "archived" and version is not None
+                and (access.rank >= ROLE_RANK["editor"] or version["published_at"] is not None))
+
     # ----------------------------------------------------------- list queries
 
     def visible_dashboard_query(self, actor: AuthContext, *, scope: str, status: str,
                                 search: str) -> Select:
-        """Listing filter. Published metadata is PUBLIC to authenticated
-        humans (product decision 2026-09-09): the list shows every published
-        dashboard and per-board authorization is enforced when the caller
-        opens the detail, the manage page or a view capability — never by
-        the listing itself. Service accounts still list only boards they
-        are granted on. Archived listing remains the owner's management
-        view: no shared/all archived listing. ACL first, then paging; never
-        fetch-then-filter in the application."""
+        """Authenticated humans may discover all published metadata. Shared
+        lists require effective access; draft lists require owner/editor and
+        archived metadata belongs only to the owner. Apply ACL before paging."""
         moment = now()
         dash = models.dashboards
         base = select(dash.c.id).where(dash.c.status == status)
@@ -195,11 +209,11 @@ class Authorizer:
             base = base.where(mine)
         elif scope == "mine":
             base = base.where(mine)
-        elif scope == "shared":
+        if scope == "shared":
             base = base.where(~mine)
         if status == "archived" or scope == "mine":
             pass  # owner-only already applied above
-        elif actor.principal_type == "service":
+        elif actor.principal_type == "service" or scope == "shared" or status == "draft":
             time_ok = ((models.dashboard_grants.c.starts_at.is_(None)
                         | (models.dashboard_grants.c.starts_at <= moment))
                        & (models.dashboard_grants.c.expires_at.is_(None)
@@ -207,10 +221,13 @@ class Authorizer:
             grant_exists = exists(
                 select(1).select_from(models.dashboard_grants).where(
                     models.dashboard_grants.c.dashboard_id == dash.c.id, time_ok,
-                    self._grant_subject_match(actor)))
+                    self._grant_subject_match(actor),
+                    *([models.dashboard_grants.c.role == "editor",
+                       models.dashboard_grants.c.subject_type != "all_authenticated"]
+                      if status == "draft" else [])))
             visible = grant_exists if scope == "shared" else or_(mine, grant_exists)
             base = base.where(visible)
-        # Human principals: published metadata is public — no grant filter.
+        # Human scope=all published metadata remains discoverable without a grant.
         if search:
             base = base.where((dash.c.title.like(f"%{search}%"))
                               | (dash.c.description.like(f"%{search}%")))

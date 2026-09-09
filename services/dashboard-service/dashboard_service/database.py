@@ -15,6 +15,8 @@ from sqlalchemy.engine import Connection, Engine
 from . import models
 from .errors import new_id, now
 
+SCHEMA_HEAD = "c72a913d8e04"
+
 
 def to_db(value: datetime | None) -> datetime | None:
     """MySQL DATETIME is timezone-less: persist naive UTC. None stays None."""
@@ -88,6 +90,10 @@ class Database:
             raise RuntimeError(
                 "database schema is missing tables; run alembic upgrade head first: "
                 + ", ".join(sorted(missing)))
+        with self.read_only() as connection:
+            heads = set(connection.execute(text("SELECT version_num FROM alembic_version")).scalars())
+        if heads != {SCHEMA_HEAD}:
+            raise RuntimeError("database schema is out of date; run alembic upgrade head first")
 
     def seed_guard(self) -> None:
         from sqlalchemy.dialects.mysql import insert

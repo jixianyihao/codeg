@@ -45,12 +45,13 @@ class Operations:
 
     # ---------------------------------------------------------------- lookups
 
-    def find(self, connection, principal_id: str, key: str):
-        return connection.execute(
-            select(models.operations).where(
-                models.operations.c.principal_id == principal_id,
-                models.operations.c.idempotency_key == key)
-        ).mappings().one_or_none()
+    def find(self, connection, principal_id: str, key: str, *, for_update=False):
+        statement = select(models.operations).where(
+            models.operations.c.principal_id == principal_id,
+            models.operations.c.idempotency_key == key)
+        if for_update:
+            statement = statement.with_for_update()
+        return connection.execute(statement).mappings().one_or_none()
 
     def get_wrapper(self, row) -> dict:
         state = row["state"]
@@ -147,7 +148,9 @@ class Operations:
         """
         from .storage import build_object_key
         fingerprint = request_hash(method, path, payload)
-        existing = self.find(connection, actor.principal_id, key)
+        # Serialize recovery against both another retry and final commit.
+        # A pre-lock snapshot must never decide which attempt to interrupt.
+        existing = self.find(connection, actor.principal_id, key, for_update=True)
         if existing is not None:
             # Every branch below first proves the request matches the key.
             require(existing["request_hash"] == fingerprint, 409,
@@ -183,7 +186,7 @@ class Operations:
             if not resumed:
                 fresh = self.find(connection, actor.principal_id, key)
                 return self.get_wrapper(fresh)  # the winner's 202 wrapper
-            self.release_reservation(connection, operation_id)
+            self.release_reservation(connection, operation_id, existing["attempt_id"])
         else:
             self.check_rate(connection, actor.principal_id)
             operation_id, attempt = new_id(), new_id()
@@ -240,12 +243,31 @@ class Operations:
                 models.upload_reservations.c.attempt_id == attempt_id)
         ).mappings().one_or_none()
 
+    def mark_upload_started(self, connection, operation_id: str, attempt_id: str) -> None:
+        """Commit this marker BEFORE starting any S3 PUT.
+
+        cleanup_pending also represents an in-flight/unknown PUT. Cleanup
+        still checks the operation lease, so a live worker may safely turn
+        the marker into uploaded; crash recovery retains coordinates/quota.
+        """
+        self.claim_for_commit(connection, operation_id, attempt_id)
+        changed = connection.execute(models.upload_reservations.update().where(
+            models.upload_reservations.c.operation_id == operation_id,
+            models.upload_reservations.c.attempt_id == attempt_id,
+            models.upload_reservations.c.state == "reserved").values(
+                state="cleanup_pending")).rowcount
+        require(changed == 1, 409, "operation_lease_lost",
+                "Upload attempt is no longer reserved")
+
     def mark_uploaded(self, connection, operation_id: str, attempt_id: str,
                       object_version_id: str | None) -> None:
-        connection.execute(models.upload_reservations.update().where(
+        self.claim_for_commit(connection, operation_id, attempt_id)
+        changed = connection.execute(models.upload_reservations.update().where(
             models.upload_reservations.c.operation_id == operation_id,
-            models.upload_reservations.c.attempt_id == attempt_id).values(
-            state="uploaded", object_version_id=object_version_id))
+            models.upload_reservations.c.attempt_id == attempt_id,
+            models.upload_reservations.c.state.in_(("reserved", "cleanup_pending"))).values(
+            state="uploaded", object_version_id=object_version_id)).rowcount
+        require(changed == 1, 409, "operation_lease_lost", "Upload attempt is no longer active")
 
     def mark_cleanup_pending(self, connection, operation_id: str,
                              attempt_id: str | None = None) -> None:
@@ -270,7 +292,7 @@ class Operations:
         if attempt_id is not None:
             statement = statement.where(
                 models.upload_reservations.c.attempt_id == attempt_id)
-        for reservation in connection.execute(statement).mappings().all():
+        for reservation in connection.execute(statement.with_for_update()).mappings().all():
             self._release_quota(connection, reservation)
             connection.execute(models.upload_reservations.delete().where(
                 models.upload_reservations.c.operation_id == reservation["operation_id"],
@@ -341,7 +363,7 @@ class Operations:
                         select(models.upload_reservations).where(
                             models.upload_reservations.c.operation_id == row["operation_id"],
                             models.upload_reservations.c.attempt_id == row["attempt_id"])
-                    ).mappings().one_or_none()
+                        .with_for_update()).mappings().one_or_none()
                     if fresh is None or fresh["state"] == "committed":
                         continue
                     self._release_quota(connection, fresh)
@@ -390,16 +412,24 @@ class Operations:
                 return own_lease is not None and own_lease < now() - timedelta(
                     seconds=self.config.cleanup_grace_seconds)
 
-    def _fail_interrupted(self, connection, row) -> None:
-        connection.execute(models.operations.update().where(
+    def _fail_interrupted(self, connection, row) -> bool:
+        # Bind recovery to exactly the attempt/lease that was inspected.
+        # In particular, a blocked old retry must not fail a newly resumed
+        # attempt after that retry wins the operation-row lock.
+        changed = connection.execute(models.operations.update().where(
             models.operations.c.id == row["id"],
+            models.operations.c.attempt_id == row["attempt_id"],
+            models.operations.c.lease_until == row["lease_until"],
+            models.operations.c.lease_until < to_db(now()),
             models.operations.c.state.in_(("accepted", "processing"))).values(
             state="failed",
             error={"code": "operation_interrupted", "message":
                    "The operation was interrupted before commit; retry with the same key",
                    "retryable": True, "trace_id": row["id"]},
-            updated_at=to_db(now())))
-        self.release_reservation(connection, row["id"])
+            updated_at=to_db(now()))).rowcount
+        if changed:
+            self.release_reservation(connection, row["id"], row["attempt_id"])
+        return bool(changed)
 
     def claim_for_commit(self, connection, operation_id: str, attempt_id: str) -> None:
         """Final transaction gate: this attempt must still own the lease.

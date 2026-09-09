@@ -14,6 +14,7 @@ class Config:
     storage_dir: Path = Path("data/content")
     control_origin: str = "http://127.0.0.1:8080"
     content_origin: str = "http://127.0.0.1:8081"
+    aresclaw_origin: str | None = None
     issuer: str = "aresclaw-dashboard"
     audience: str = "aresclaw-dashboard-api"
     w3_verify_url: str | None = None
@@ -54,13 +55,22 @@ class Config:
             raise ValueError("DASHBOARD_DATABASE_URL must use mysql+pymysql; MySQL is required")
         if len(self.jwt_secret) < 32:
             raise ValueError("JWT key file must contain at least 32 random bytes")
-        for name in ("control_origin", "content_origin"):
+        origins = ["control_origin", "content_origin"]
+        if self.aresclaw_origin is not None:
+            origins.append("aresclaw_origin")
+        for name in origins:
             url = urlsplit(getattr(self, name))
             if url.scheme not in ("https", "http") or not url.hostname or url.username or url.password \
                     or url.query or url.fragment or url.path not in ("", "/"):
                 raise ValueError(f"{name} must be an absolute HTTP(S) origin")
             if url.scheme == "http" and url.hostname not in ("localhost", "127.0.0.1", "::1"):
                 raise ValueError(f"{name} requires HTTPS off loopback")
+            # Validate the port too; urlsplit otherwise accepts malformed
+            # authorities that a browser may normalize differently.
+            _ = url.port
+            if any(c.isspace() or c in '<>"\\' for c in getattr(self, name)):
+                raise ValueError(f"{name} must be an absolute HTTP(S) origin")
+            setattr(self, name, getattr(self, name).rstrip("/"))
         self.control_origin = self.control_origin.rstrip("/")
         self.content_origin = self.content_origin.rstrip("/")
         if self.content_origin == self.control_origin:
@@ -111,6 +121,7 @@ class Config:
             storage_dir=Path(os.getenv("DASHBOARD_STORAGE_DIR", "data/staging")),
             control_origin=os.getenv("DASHBOARD_CONTROL_ORIGIN", "http://127.0.0.1:8080"),
             content_origin=os.getenv("DASHBOARD_CONTENT_ORIGIN", "http://127.0.0.1:8081"),
+            aresclaw_origin=os.getenv("DASHBOARD_ARESCLAW_ORIGIN") or None,
             issuer=os.getenv("DASHBOARD_JWT_ISSUER", "aresclaw-dashboard"),
             audience=os.getenv("DASHBOARD_JWT_AUDIENCE", "aresclaw-dashboard-api"),
             w3_verify_url=os.getenv("DASHBOARD_W3_VERIFY_URL"),

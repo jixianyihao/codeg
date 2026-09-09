@@ -11,18 +11,33 @@ current-version pointer only ever changes in the final committed step.
 """
 from collections.abc import Callable
 
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from . import models, quotas
 from .authn import AuthContext
 from .authorization import Authorizer
 from .config import Config
-from .database import Database, record_audit, to_db
-from .errors import ApiError, new_id, now, require
+from .database import Database, from_db, record_audit, to_db
+from .errors import ApiError, now, require, to_rfc3339
 from .operations import Operations
 from .storage import ContentStore
 
 CONTENT_LOCK_RETRIES = 3
+
+
+def version_state(connection, row, *, include_draft: bool = True) -> dict:
+    """Same pointer/number contract for mutation results and resource reads."""
+    current_id = row["current_version_id"]
+    draft_id = row["draft_version_id"] if include_draft else None
+    ids = [value for value in (current_id, draft_id) if value is not None]
+    numbers = dict(connection.execute(select(models.dashboard_versions.c.id,
+                                             models.dashboard_versions.c.number).where(
+        models.dashboard_versions.c.id.in_(ids))).all()) if ids else {}
+    return {"current_version_id": current_id, "current_version_number": numbers.get(current_id),
+            "draft_version_id": draft_id, "draft_version_number": numbers.get(draft_id),
+            "has_draft": draft_id is not None,
+            "published_at": to_rfc3339(from_db(row["published_at"]))}
 
 
 class PublishOutcome:
@@ -40,9 +55,12 @@ def _validate_metadata(metadata: dict, *, creating: bool, config: Config):
     elif title is not None:
         require(isinstance(title, str) and 1 <= len(title.strip()) <= 200, 422,
                 "invalid_input", "title must be 1-200 characters when provided")
-    description = metadata.get("description", "")
-    require(isinstance(description, str) and len(description) <= 2000, 422,
-            "invalid_input", "description must be at most 2000 characters")
+    description = metadata.get("description", "" if creating else None)
+    if creating or "description" in metadata:
+        require(isinstance(description, str) and len(description) <= 2000, 422,
+                "invalid_input", "description must be at most 2000 characters")
+    require(metadata.get("disposition", "publish") in ("publish", "save_draft"),
+            422, "invalid_input", "disposition must be publish/save_draft")
     content_sha = metadata.get("content_sha256")
     require(isinstance(content_sha, str) and len(content_sha) == 64
             and all(c in "0123456789abcdef" for c in content_sha), 422, "invalid_input",
@@ -83,8 +101,13 @@ class Publisher:
         actor.requires_scope("write")
         title, description, content_sha, byte_size, expected_revision = _validate_metadata(
             metadata, creating=dashboard_id is None, config=self.config)
+        disposition = metadata.get("disposition", "publish")
         payload = {"title": title, "description": description, "content_sha256": content_sha,
                    "byte_size": byte_size}
+        # Preserve the legacy publish fingerprint while making save a distinct
+        # immutable logical request under the same endpoint.
+        if disposition != "publish":
+            payload["disposition"] = disposition
         if expected_revision is not None:
             payload["expected_revision"] = expected_revision
 
@@ -96,6 +119,9 @@ class Publisher:
         put_unknown = False
         try:
             staged_path = self.store.stage_stream(attempt_id, html_stream, content_sha, byte_size)
+            with self.database.transaction() as connection:
+                self.operations.mark_upload_started(connection, operation_id, attempt_id)
+            put_unknown = True
             try:
                 object_ref = self.store.put_verified(staged["object_key"],
                                                      staged_path.read_bytes(),
@@ -127,7 +153,7 @@ class Publisher:
             try:
                 return self._stage_three(fresh, staged, title, description,
                                          content_sha, byte_size, expected_revision,
-                                         trace_id, key)
+                                         trace_id, key, disposition)
             except ApiError as error:
                 # The final commit legitimately failed (revocation, revision
                 # conflict, ...): settle the attempt and record the failure.
@@ -165,12 +191,24 @@ class Publisher:
             try:
                 with self.database.transaction() as connection:
                     with self.database.guard(connection, exclusive=False):
+                        existing = self.operations.find(connection, actor.principal_id, key,
+                                                        for_update=True)
+                        operation_payload = payload
+                        disposition = payload.get("disposition", "publish")
+                        # Old publishers normalized an omitted update description
+                        # to ''. Only actual legacy records use that fingerprint;
+                        # new requests must distinguish preservation from clearing.
+                        if (existing is not None and existing["action"] == "publish"
+                                and disposition == "publish" and payload["description"] is None):
+                            operation_payload = {**payload, "description": ""}
                         if dashboard_id is not None:
                             row = self.authorizer.dashboard_or_none(connection, dashboard_id)
                             require(row is not None, 404, "not_found", "Dashboard is not visible")
                             self.authorizer.authorize(connection, row, actor, "write")
-                            require(row["status"] == "published", 409, "invalid_input",
-                                    "Restore the dashboard before publishing a new version")
+                            require(row["status"] != "archived", 409, "invalid_input",
+                                    "Restore the dashboard to draft before changing content")
+                            if payload.get("disposition", "publish") == "publish":
+                                self.authorizer.authorize_publication(connection, row, actor)
                             quota_owner_id = row["owner_principal_id"]
                         else:
                             self.authorizer.check_context_validity(connection, actor)
@@ -189,8 +227,10 @@ class Publisher:
                                 new_dashboard=dashboard_id is None)
 
                         begun = self.operations.begin_staged(
-                            connection, actor, key, action="publish", method=method, path=path,
-                            target_id=dashboard_id, payload=payload,
+                            connection, actor, key,
+                            action="publish_v2" if disposition == "publish" else "save_draft",
+                            method=method, path=path,
+                            target_id=dashboard_id, payload=operation_payload,
                             new_dashboard=dashboard_id is None, byte_size=byte_size,
                             quota_owner_id=quota_owner_id, reserve=reserve)
                         if "attempt_id" not in begun:
@@ -219,7 +259,7 @@ class Publisher:
 
     def _stage_three(self, actor: AuthContext, staged: dict, title, description,
                      content_sha: str, byte_size: int, expected_revision, trace_id: str,
-                     key: str) -> PublishOutcome:
+                     key: str, disposition: str = "publish") -> PublishOutcome:
         operation_id = staged["operation_id"]
         attempt_id = staged["attempt_id"]
         dashboard_id = staged["dashboard_id"]
@@ -250,11 +290,16 @@ class Publisher:
                     # current ACL (upload-period revocation is caught here).
                     self.authorizer.authorize(connection, dashboard_row, actor, "write",
                                               moment=moment)
-                    require(dashboard_row["status"] == "published", 409, "invalid_input",
-                            "Restore the dashboard before publishing a new version")
+                    require(dashboard_row["status"] != "archived", 409, "invalid_input",
+                            "Restore the dashboard to draft before changing content")
+                    if disposition == "publish":
+                        self.authorizer.authorize_publication(connection, dashboard_row, actor,
+                                                              moment=moment)
                     require(dashboard_row["revision"] == expected_revision, 409,
                             "revision_conflict", "Dashboard changed; read it again")
                     title = title if title is not None else dashboard_row["title"]
+                    description = (description if description is not None
+                                   else dashboard_row["description"])
                     existing_versions = quotas.count_dashboard_versions(
                         connection, dashboard_row["id"])
                     require(existing_versions < self.config.max_versions_per_dashboard, 507,
@@ -267,35 +312,47 @@ class Publisher:
                         storage_key=reservation["storage_key"],
                         object_version_id=reservation["object_version_id"],
                         sha256=content_sha, byte_size=byte_size,
-                        created_by=actor.principal_id, created_at=moment_db))
+                        created_by=actor.principal_id, created_at=moment_db,
+                        published_at=moment_db if disposition == "publish" else None))
+                    pointer_values = ({"current_version_id": version_id, "status": "published",
+                                       "published_at": moment_db} if disposition == "publish"
+                                      else {"draft_version_id": version_id})
                     connection.execute(models.dashboards.update().where(
                         models.dashboards.c.id == dashboard_row["id"]).values(
                         title=title, description=description,
-                        current_version_id=version_id, revision=revision,
-                        updated_at=moment_db, published_at=moment_db))
+                        revision=revision, updated_at=moment_db, **pointer_values))
+                    status = "published" if disposition == "publish" else dashboard_row["status"]
+                    draft_id = (version_id if disposition == "save_draft"
+                                else dashboard_row["draft_version_id"])
                     effective_id = dashboard_row["id"]
                 else:
                     # Create path: no dashboard row exists for these fixed ids.
                     connection.execute(models.dashboards.insert().values(
                         id=dashboard_id, owner_principal_id=actor.principal_id,
                         title=title, description=description, current_version_id=None,
-                        revision=1, status="published", created_at=moment_db,
-                        updated_at=moment_db, published_at=moment_db))
+                        revision=1, status="published" if disposition == "publish" else "draft",
+                        created_at=moment_db, updated_at=moment_db,
+                        published_at=moment_db if disposition == "publish" else None))
                     connection.execute(models.dashboard_versions.insert().values(
                         id=version_id, dashboard_id=dashboard_id, number=1,
                         storage_bucket=reservation["storage_bucket"],
                         storage_key=reservation["storage_key"],
                         object_version_id=reservation["object_version_id"],
                         sha256=content_sha, byte_size=byte_size,
-                        created_by=actor.principal_id, created_at=moment_db))
+                        created_by=actor.principal_id, created_at=moment_db,
+                        published_at=moment_db if disposition == "publish" else None))
                     connection.execute(models.dashboards.update().where(
                         models.dashboards.c.id == dashboard_id).values(
-                        current_version_id=version_id))
+                        **({"current_version_id": version_id} if disposition == "publish"
+                           else {"draft_version_id": version_id})))
                     revision = 1
                     number = 1
+                    status = "published" if disposition == "publish" else "draft"
+                    draft_id = version_id if disposition == "save_draft" else None
                     effective_id = dashboard_id
                 self.operations.convert_reservation(connection, operation_id, attempt_id)
-                record_audit(connection, actor=actor, action="publish_version",
+                record_audit(connection, actor=actor,
+                             action="publish_version" if disposition == "publish" else "save_draft",
                              target_type="dashboard", target_id=effective_id,
                              after={"version_id": version_id, "number": number,
                                     "sha256": content_sha, "byte_size": byte_size},
@@ -305,8 +362,13 @@ class Publisher:
                     "version_id": version_id,
                     "version_number": number,
                     "revision": revision,
+                    "status": status,
+                    "disposition": disposition,
+                    "draft_version_id": draft_id,
+                    "has_draft": draft_id is not None,
                     "sha256": content_sha,
                     "view_url": f"{self.config.control_origin}/dashboards/{effective_id}",
+                    **version_state(connection, self.authorizer.dashboard(connection, effective_id)),
                 }
                 connection.execute(models.operations.update().where(
                     models.operations.c.id == operation_id).values(

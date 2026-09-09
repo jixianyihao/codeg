@@ -77,7 +77,7 @@ def _assert_rejected_and_unchanged(bundle, errors, dashboard_id, expected_code):
         operation = connection.execute(
             sqlalchemy.select(models.operations.c.state, models.operations.c.error)
             .where(models.operations.c.target_id == dashboard_id,
-                   models.operations.c.action == "publish")
+                   models.operations.c.action.in_(("publish", "publish_v2")))
             .order_by(models.operations.c.created_at.desc())).mappings().first()
     assert operation["state"] == "failed"
     assert operation["error"]["code"] == expected_code

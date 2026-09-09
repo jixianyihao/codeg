@@ -5,6 +5,9 @@ services:
     build: .
     command: sh -c "alembic upgrade head && python -m dashboard_service.operator stats"
     env_file: .env
+    secrets:
+      - source: dashboard-jwt
+        target: dashboard-jwt.key
     depends_on:
       mysql:
         condition: service_healthy
@@ -14,6 +17,9 @@ services:
     build: .
     command: python -m dashboard_service serve-control --host 0.0.0.0 --port 8080
     env_file: .env
+    secrets:
+      - source: dashboard-jwt
+        target: dashboard-jwt.key
     ports:
       - "8080:8080"
     depends_on:
@@ -25,6 +31,9 @@ services:
     build: .
     command: python -m dashboard_service serve-content --host 0.0.0.0 --port 8081
     env_file: .env
+    secrets:
+      - source: dashboard-jwt
+        target: dashboard-jwt.key
     ports:
       - "8081:8081"
     depends_on:
@@ -64,3 +73,7 @@ services:
 volumes:
   mysql-data:
   minio-data:
+
+secrets:
+  dashboard-jwt:
+    file: ${DASHBOARD_JWT_KEY_HOST_FILE:-./secrets/dashboard-jwt.key}

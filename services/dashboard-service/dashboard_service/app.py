@@ -7,22 +7,24 @@ Production runs the two apps as separate processes (design.md §9).
 """
 import asyncio
 import logging
+from html import escape
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from .authn import Authenticator, HttpW3Verifier
 from .config import Config
 from .content_app import create_content_app
 from .database import Database, create_db_engine
-from .errors import ApiError, new_id
-from .routers import build_service
+from .errors import ApiError, new_id, require_uuid
 from .routers import access as access_router
+from .routers import build_service, groups_router, operations_router, view_router
 from .routers import dashboards as dashboards_router
-from .routers import groups_router, meta as meta_router, operations_router, view_router
-from .authn import Authenticator, HttpW3Verifier
+from .routers import meta as meta_router
 
 logger = logging.getLogger("dashboard_service")
 
@@ -74,11 +76,9 @@ class RequestGuards:
                 # are cut off before any parser caches them (R6).
                 received += len(message.get("body", b"") or b"")
                 if received > limit:
-                    response = JSONResponse(
-                        {"code": "upload_too_large", "message": "Request body exceeds limit",
-                         "trace_id": state["trace_id"], "retryable": False},
-                        status_code=413)
-                    await response(scope, receive, safe_send)
+                    # FastAPI catches ordinary parser exceptions and emits
+                    # 400. Raise a handled HTTP exception before sending any
+                    # response; otherwise one request sends both 413 and 400.
                     raise _ClientAbort()
             return message
 
@@ -97,14 +97,18 @@ class RequestGuards:
         try:
             await self.app(scope, bounded_receive, safe_send)
         except _ClientAbort:
-            return
+            # A raw ASGI consumer may have no exception middleware.
+            await JSONResponse(_error_body("upload_too_large", "Request body exceeds limit",
+                                           state["trace_id"]), status_code=413)(
+                                               scope, receive, safe_send)
         finally:
             if slot_acquired:
                 self.upload_slots.release()
 
 
-class _ClientAbort(Exception):
-    pass
+class _ClientAbort(HTTPException):
+    def __init__(self):
+        super().__init__(status_code=413, detail="Request body exceeds limit")
 
 
 def _error_body(code: str, message: str, trace_id: str, retryable: bool = False,
@@ -127,6 +131,12 @@ def create_control_app(config: Config | None = None, *, database: Database | Non
                   openapi_url=None)
     app.state.service = service
     app.add_middleware(RequestGuards, config=config)
+
+    @app.exception_handler(_ClientAbort)
+    async def body_too_large(request: Request, error: _ClientAbort):
+        return JSONResponse(_error_body("upload_too_large", "Request body exceeds limit",
+                                       getattr(request.state, "trace_id", None) or new_id()),
+                            status_code=413)
 
     @app.exception_handler(ApiError)
     async def api_error(request: Request, error: ApiError):
@@ -175,16 +185,29 @@ def create_control_app(config: Config | None = None, *, database: Database | Non
         """Stable share/bookmark entry: authenticate with the visitor's own
         W3 identity, mint a short-lived capability, then location.replace to
         the content-origin trusted loader — a single-layer view, no nested
-        iframes on the control origin (impl-handoff section 4)."""
+        iframes on the control origin (docs/aresclaw-dashboard/design.md,
+        "List management and viewing isolation")."""
         return FileResponse(web_dir / "view.html", media_type="text/html",
                             headers={"Content-Security-Policy": page_policy})
 
     @app.get("/dashboards/{dashboard_id}/manage", include_in_schema=False)
     def dashboard_manage(dashboard_id: str):
-        """Management surface: metadata, ACL, versions, rollback,
-        archive/restore. Deliberately embeds no viewer."""
-        return FileResponse(web_dir / "index.html", media_type="text/html",
-                            headers={"Content-Security-Policy": page_policy})
+        return management_notice(require_uuid(dashboard_id, "dashboard_id"))
+
+    def management_notice(dashboard_id: str | None = None):
+        link = ""
+        if config.aresclaw_origin:
+            target = config.aresclaw_origin + "/workspace?view=dashboards"
+            if dashboard_id:
+                target += "&dashboard=" + dashboard_id
+            link = f'<p><a href="{escape(target, quote=True)}">在 AresClaw 中管理看板</a></p>'
+        page = ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                '<title>看板管理已迁移</title><link rel="stylesheet" href="/styles.css">'
+                '</head><body><main><h1>在 AresClaw 中管理看板</h1>'
+                '<p>请打开 AresClaw 的看板列表，在卡片内管理内容、版本和访问权限。'
+                '也可以使用看板 CLI。</p>' + link + '</main></body></html>')
+        return HTMLResponse(page, headers={"Content-Security-Policy": page_policy})
 
     @app.get("/dashboards/{dashboard_id}/view", include_in_schema=False)
     def dashboard_full_view(dashboard_id: str):
@@ -222,8 +245,7 @@ def create_control_app(config: Config | None = None, *, database: Database | Non
 
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(web_dir / "index.html", media_type="text/html",
-                            headers={"Content-Security-Policy": page_policy})
+        return management_notice()
 
     @app.get("/health/live")
     def live():
@@ -231,7 +253,6 @@ def create_control_app(config: Config | None = None, *, database: Database | Non
 
     @app.get("/health/ready")
     def ready():
-        from sqlalchemy import text
         checks = {"database": "ok", "human_auth":
                   "configured" if config.w3_verify_url else "disabled"}
         try:
@@ -253,4 +274,4 @@ def create_control_app(config: Config | None = None, *, database: Database | Non
     return app
 
 
-__all__ = ["create_control_app", "create_content_app", "build_service"]
+__all__ = ["build_service", "create_content_app", "create_control_app"]

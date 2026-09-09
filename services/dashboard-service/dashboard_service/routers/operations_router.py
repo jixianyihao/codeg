@@ -10,17 +10,32 @@ from . import Service, get_actor, get_service
 router = APIRouter(prefix="/api/v1", tags=["operations"])
 
 
-def _visible(connection, service: Service, actor: AuthContext, row) -> None:
+def _visible_wrapper(connection, service: Service, actor: AuthContext, row) -> dict:
     """The stored result is only returned while its target is still visible
     to the caller — holding an operation_id grants nothing."""
-    if row["target_id"] is None:
-        return
-    dashboard = service.authorizer.dashboard_or_none(connection, row["target_id"])
+    wrapper = service.operations.get_wrapper(row)
+    result = wrapper.get("result") or {}
+    dashboard_id = result.get("dashboard_id") or row["target_id"]
+    if dashboard_id is None:
+        return wrapper
+    dashboard = service.authorizer.dashboard_or_none(connection, dashboard_id)
     if dashboard is None:
-        return
-    if dashboard["owner_principal_id"] != actor.principal_id:
-        access = service.authorizer.effective_access(connection, dashboard, actor)
-        require(access.role is not None, 404, "not_found", "Operation is not visible")
+        require(not result.get("dashboard_id"), 404, "not_found", "Operation is not visible")
+        return wrapper  # The target may be a group or another resource type.
+    access = service.authorizer.effective_access(connection, dashboard, actor)
+    require(access.role is not None, 404, "not_found", "Operation is not visible")
+    if access.rank < 2 and result:
+        if result.get("version_id"):
+            version = connection.execute(select(models.dashboard_versions).where(
+                models.dashboard_versions.c.id == result["version_id"],
+                models.dashboard_versions.c.dashboard_id == dashboard_id)).mappings().one_or_none()
+            require(service.authorizer.version_visible(dashboard, version, access),
+                    404, "not_found", "Operation is not visible")
+        # A direct publication may have retained an unrelated draft. Never
+        # replay that stored private pointer to an editor who became a viewer.
+        wrapper["result"] = {**result, "draft_version_id": None,
+                             "draft_version_number": None, "has_draft": False}
+    return wrapper
 
 
 @router.get("/operations")
@@ -39,8 +54,7 @@ async def by_request_id(request: Request, request_id: str,
             if row["result_purged_at"] is not None:
                 raise ApiError(410, "idempotency_result_expired",
                                "The stored result expired; start a new operation with a new key")
-            _visible(connection, service, actor, row)
-            return service.operations.get_wrapper(row)
+            return _visible_wrapper(connection, service, actor, row)
 
     from starlette.concurrency import run_in_threadpool
     return await run_in_threadpool(run)
@@ -65,8 +79,7 @@ async def by_operation_id(operation_id: str, request: Request,
             if row["result_purged_at"] is not None:
                 raise ApiError(410, "idempotency_result_expired",
                                "The stored result expired; start a new operation with a new key")
-            _visible(connection, service, actor, row)
-            return service.operations.get_wrapper(row)
+            return _visible_wrapper(connection, service, actor, row)
 
     from starlette.concurrency import run_in_threadpool
     return await run_in_threadpool(run)

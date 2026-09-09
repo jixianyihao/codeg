@@ -1,4 +1,4 @@
-"""The isolated content origin (contracts.md §6).
+"""The isolated content origin (docs/aresclaw-dashboard/contracts.md §7).
 
 Only the trusted loader pages (GET /view/{id}, legacy GET /render, their
 scripts) and GET /content live here. /content accepts view capabilities
@@ -22,7 +22,8 @@ BOOTSTRAP_CSP = (
 )
 
 # The loader is never embedded by anything — the control-origin entry
-# navigates the browser to it (single layer, impl-handoff section 4.3).
+# navigates the browser to it (single layer; docs/aresclaw-dashboard/design.md,
+# "List management and viewing isolation").
 LOADER_HEADERS = {
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",

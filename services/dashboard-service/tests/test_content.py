@@ -219,8 +219,8 @@ def test_view_loader_route_and_csp(client, content_client, human_board):
 
 
 def test_control_routes_serve_launcher_and_manage(client, human_board):
-    """/dashboards/{id} is the stable launcher; /manage serves the admin
-    page; the legacy /view serves the launcher too. Control pages embed
+    """/dashboards/{id} is the stable launcher; /manage is a compatibility
+    notice; the legacy /view serves the launcher too. Control pages embed
     nothing: frame-src is absent (default-src 'none' denies frames)."""
     _, created = human_board
     dashboard_id = created["dashboard_id"]
@@ -236,5 +236,7 @@ def test_control_routes_serve_launcher_and_manage(client, human_board):
 
     manage = client.get(f"/dashboards/{dashboard_id}/manage")
     assert manage.status_code == 200
-    assert 'src="/app.js"' in manage.text
+    assert "AresClaw" in manage.text
+    assert "<form" not in manage.text
+    assert 'src="/app.js"' not in manage.text
     assert 'src="/view.js"' not in manage.text

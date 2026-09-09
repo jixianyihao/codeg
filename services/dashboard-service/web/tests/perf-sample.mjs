@@ -1,4 +1,6 @@
-/* Performance sampling against the REAL service stack (impl-handoff T4):
+/* Performance sampling against the REAL service stack:
+ * docs/aresclaw-dashboard/design.md covers capacity/deployment boundaries;
+ * docs/aresclaw-dashboard/progress.md records measured validation evidence.
  * publishes 1/5/10 MiB HTML via the integration CLI, then measures in
  * headless Chromium: launcher→loader hop, /content backend wait (network
  * timings), first paint of the sandboxed frame, first interaction latency,

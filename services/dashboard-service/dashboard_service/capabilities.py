@@ -16,7 +16,7 @@ from .authn import AuthContext
 from .authorization import Authorizer
 from .config import Config
 from .database import Database, from_db, to_db
-from .errors import ApiError, now, require
+from .errors import now, require
 
 CAPABILITY_TTL_SECONDS = 60
 
@@ -51,15 +51,17 @@ class CapabilityService:
             dashboard = self.authorizer.dashboard(connection, dashboard_id)
             access = self.authorizer.authorize(connection, dashboard, actor, "read",
                                                moment=moment)
-            require(dashboard["status"] == "published", 404, "not_found",
+            require(dashboard["status"] != "archived", 404, "not_found",
                     "Dashboard is not visible")
-            target_version_id = version_id or dashboard["current_version_id"]
+            target_version_id = version_id or dashboard[
+                "draft_version_id" if dashboard["status"] == "draft" else "current_version_id"]
             version = connection.execute(
-                select(models.dashboard_versions.c.id, models.dashboard_versions.c.created_at)
+                select(models.dashboard_versions)
                 .where(models.dashboard_versions.c.id == target_version_id,
                        models.dashboard_versions.c.dashboard_id == dashboard_id)
             ).mappings().one_or_none()
-            require(version is not None, 404, "not_found", "Version is not visible")
+            require(self.authorizer.version_visible(dashboard, version, access),
+                    404, "not_found", "Version is not visible")
             # Basis expiry: the longest-lived effective source granting at
             # least viewer, capped by identity validity and the 60s window.
             basis = _latest_expiry(access.sources) or moment + timedelta(days=365)
@@ -113,7 +115,7 @@ class CapabilityService:
             access = self.authorizer.effective_access(connection, dashboard, pseudo)
             require(access.role is not None, 401, "invalid_capability",
                     "Access was revoked")
-            require(dashboard["status"] == "published", 401, "invalid_capability",
+            require(dashboard["status"] != "archived", 401, "invalid_capability",
                     "Dashboard is archived")
             revoked = self.revocation.is_revoked(
                 None, row["identity_session_ref"], from_db(row["created_at"]))
@@ -123,7 +125,7 @@ class CapabilityService:
                     models.dashboard_versions.c.id == row["version_id"],
                     models.dashboard_versions.c.dashboard_id == dashboard["id"])
             ).mappings().one_or_none()
-            require(version is not None, 401, "invalid_capability",
+            require(self.authorizer.version_visible(dashboard, version, access), 401, "invalid_capability",
                     "View capability is invalid")
             return version
 

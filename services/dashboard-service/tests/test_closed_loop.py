@@ -1,6 +1,6 @@
 """End-to-end closed loop over the real service apps (real MySQL + S3):
 machine publish → human grant → capability view → revoke → editor update →
-rollback → archive/restore → source download → list visibility."""
+rollback → archive/restore draft → explicit publication → list visibility."""
 import hashlib
 import uuid
 
@@ -114,7 +114,8 @@ def test_full_lifecycle_closed_loop(client, content_client, operator,
     assert source.content == v2
     assert source.headers["content-type"].startswith("text/plain")
 
-    # 8. Archive blocks access; restore brings it back.
+    # 8. Archive blocks access. Restore prepares a private draft; only an
+    # explicit owner publication restores the existing viewer's access.
     revision = client.get(f"/api/v1/dashboards/{dashboard_id}",
                           headers=service_headers(machine_token)).json()["revision"]
     archived = client.post(
@@ -129,8 +130,31 @@ def test_full_lifecycle_closed_loop(client, content_client, operator,
         headers={**service_headers(machine_token), "Idempotency-Key": str(uuid.uuid4())},
         json={"expected_revision": archived.json()["result"]["revision"]})
     assert restored.status_code == 200
+    restored_result = restored.json()["result"]
+    assert restored_result["status"] == "draft"
+    assert restored_result["draft_version_id"] == board["version_id"]
+    assert client.get(f"/api/v1/dashboards/{dashboard_id}",
+                      headers=human_headers(human_token)).status_code == 404
+    assert client.post(
+        f"/api/v1/dashboards/{dashboard_id}/view-capabilities",
+        headers=human_headers(human_token), json={}).status_code == 404
+    republished = client.post(
+        f"/api/v1/dashboards/{dashboard_id}/publish",
+        headers={**service_headers(machine_token), "Idempotency-Key": str(uuid.uuid4())},
+        json={"version_id": restored_result["draft_version_id"],
+              "expected_revision": restored_result["revision"]})
+    assert republished.status_code == 200, republished.text
+    assert republished.json()["result"]["status"] == "published"
+    assert republished.json()["result"]["draft_version_id"] is None
     assert client.get(f"/api/v1/dashboards/{dashboard_id}",
                       headers=human_headers(human_token)).status_code == 200
+    reissued = client.post(
+        f"/api/v1/dashboards/{dashboard_id}/view-capabilities",
+        headers=human_headers(human_token), json={})
+    assert reissued.status_code == 200
+    restored_capability = reissued.json()["render_url"].split("#", 1)[1]
+    assert content_client.get("/content", headers={
+        "Authorization": f"Bearer {restored_capability}"}).content == v1
 
     # 9. Final integrity: S3 objects behind both versions verify byte-exact.
     from dashboard_service.storage import ObjectRef

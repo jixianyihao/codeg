@@ -5,7 +5,7 @@ from fastapi import Request
 from sqlalchemy import select
 
 from .. import models
-from ..authn import Authenticator, AuthContext
+from ..authn import AuthContext, Authenticator
 from ..authorization import Authorizer
 from ..capabilities import CapabilityService
 from ..config import Config
@@ -13,7 +13,7 @@ from ..database import Database, from_db
 from ..errors import ApiError, to_rfc3339
 from ..groups_service import GroupsService
 from ..operations import Operations
-from ..publishing import Publisher
+from ..publishing import Publisher, version_state
 from ..storage import ContentStore
 
 
@@ -68,11 +68,6 @@ def dashboard_view(connection, service: Service, row, access) -> dict:
     owner = connection.execute(
         select(models.principals.c.display_name, models.principals.c.type)
         .where(models.principals.c.id == row["owner_principal_id"])).mappings().one()
-    version_number = None
-    if row["current_version_id"]:
-        version_number = connection.execute(
-            select(models.dashboard_versions.c.number).where(
-                models.dashboard_versions.c.id == row["current_version_id"])).scalar_one_or_none()
     return {
         "id": row["id"],
         "title": row["title"],
@@ -80,14 +75,12 @@ def dashboard_view(connection, service: Service, row, access) -> dict:
         "owner_principal_id": row["owner_principal_id"],
         "owner_name": owner["display_name"],
         "owner_type": owner["type"],
-        "current_version_id": row["current_version_id"],
-        "current_version_number": version_number,
+        **version_state(connection, row, include_draft=access.rank >= 2),
         "revision": row["revision"],
         "status": row["status"],
         "role": access.role,
         "created_at": to_rfc3339(from_db(row["created_at"])),
         "updated_at": to_rfc3339(from_db(row["updated_at"])),
-        "published_at": to_rfc3339(from_db(row["published_at"])),
         "expires_at": access.expires_at,
         "view_url": f"{service.config.control_origin}/dashboards/{row['id']}",
     }

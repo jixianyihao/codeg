@@ -129,6 +129,7 @@ def test_capabilities_endpoint(client, make_service_account):
     _, token = make_service_account("ci-caps")
     body = client.get("/api/v1/capabilities", headers=service_headers(token)).json()
     assert body["api_major"] == 1
+    assert {"publish", "create_draft", "save_draft", "publish_draft"} <= set(body["features"])
     assert body["max_upload_bytes"] == 10 * 1024 * 1024
     assert body["content_origin"].startswith("http://127.0.0.1:18081")
     assert "service_jwt" in body["auth_methods"]
