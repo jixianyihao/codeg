@@ -378,7 +378,6 @@ class DirectTransport:
         return state
 
     def freeze_publish(self, params: dict, request_id: str) -> dict:
-        source = safe_input(self.workdir, params["path"])
         descriptor = {
             "kind": "publish",
             "service_origin": self.origin,
@@ -391,6 +390,8 @@ class DirectTransport:
         }
         state_path = self._state_dir() / f"publish-{request_id}.json"
         if state_path.exists():
+            # Resume: only the frozen snapshot is needed. The original file
+            # may have been moved or deleted — it is NOT re-read (R15).
             try:
                 frozen = json.loads(state_path.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -402,7 +403,7 @@ class DirectTransport:
             except (KeyError, ValueError) as exc:
                 raise CliError("request_state_invalid", "frozen request state is invalid", EXIT_CONFLICT) from exc
         else:
-            html = read_limited(source)
+            html = read_limited(safe_input(self.workdir, params["path"]))
             frozen = {"descriptor": descriptor, "content_base64": base64.b64encode(html).decode("ascii")}
             try:
                 with state_path.open("x", encoding="utf-8") as handle:
@@ -469,6 +470,74 @@ class DirectTransport:
                 path_value, dashboard_id, expected_revision, request_id
             )
         return changes
+
+    def freeze_group_members(self, params: dict, request_id: str) -> dict:
+        """Freeze the FINAL membership replacement request for this
+        request-id (R13). A retry after a lost response reuses the frozen
+        member list and expected_revision — it never re-reads the group and
+        never dies on the revision the first success bumped."""
+        descriptor = {
+            "kind": "group_member_change",
+            "service_origin": self.origin,
+            "principal_id": self.principal()["principal_id"],
+            "group_id": params["group_id"],
+            "user_id": params["user_id"],
+            "change": params["change"],
+            "expected_revision": params["expected_revision"],
+        }
+        state_path = self._state_dir() / f"group-{request_id}.json"
+        if state_path.exists():
+            try:
+                frozen = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise CliError(
+                    "request_state_invalid",
+                    "frozen request state is unreadable",
+                    EXIT_CONFLICT,
+                ) from exc
+            if frozen.get("descriptor") != descriptor or not isinstance(
+                frozen.get("members"), list
+            ):
+                raise CliError(
+                    "idempotency_conflict",
+                    "request ID was already used with different group parameters",
+                    EXIT_CONFLICT,
+                )
+            return {"members": frozen["members"],
+                    "expected_revision": frozen["expected_revision"]}
+        frozen = {"descriptor": descriptor,
+                  "members": self._compute_members(params),
+                  "expected_revision": params["expected_revision"]}
+        try:
+            with state_path.open("x", encoding="utf-8") as handle:
+                json.dump(frozen, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.chmod(state_path, 0o600)
+            except OSError:
+                pass
+        except FileExistsError:
+            return self.freeze_group_members(params, request_id)
+        return {"members": frozen["members"],
+                "expected_revision": frozen["expected_revision"]}
+
+    def _compute_members(self, params: dict) -> list:
+        # First run only: membership detail is owner-only, so read the full
+        # group (group.show) and CAS-replace. The computed list is frozen
+        # above; retries never come through this path.
+        response = self.invoke("group.show", {"group_id": params["group_id"]}, None)
+        detail = response[0] if isinstance(response, tuple) else response
+        if not isinstance(detail, dict) or not isinstance(detail.get("members"), list):
+            raise CliError("invalid_response", "group detail response is invalid", EXIT_REMOTE)
+        if detail.get("revision") != params["expected_revision"]:
+            raise CliError("revision_conflict", "group revision changed; read it again", EXIT_CONFLICT)
+        members = list(dict.fromkeys(detail["members"]))
+        if params["change"] == "add" and params["user_id"] not in members:
+            members.append(params["user_id"])
+        if params["change"] == "remove":
+            members = [member for member in members if member != params["user_id"]]
+        return members
 
     # -------------------------------------------------- REST command mapping
 
@@ -844,21 +913,19 @@ def command_action(args, transport):
 
 
 def group_member_change(transport, params: dict, request_id: str):
-    # Membership detail is owner-only: read the full group (group.show),
-    # then CAS-replace. A concurrent modification fails the revision check
-    # instead of overwriting someone else's change.
-    response = transport.invoke("group.show", {"group_id": params["group_id"]}, None)
-    detail = response[0] if isinstance(response, tuple) else response
-    if not isinstance(detail, dict) or not isinstance(detail.get("members"), list):
-        raise CliError("invalid_response", "group detail response is invalid", EXIT_REMOTE)
-    if detail.get("revision") != params["expected_revision"]:
-        raise CliError("revision_conflict", "group revision changed; read it again", EXIT_CONFLICT)
-    members = list(dict.fromkeys(detail["members"]))
-    if params["change"] == "add" and params["user_id"] not in members:
-        members.append(params["user_id"])
-    if params["change"] == "remove":
-        members = [member for member in members if member != params["user_id"]]
-    return transport.invoke("group.set_members", {"group_id": params["group_id"], "members": members, "expected_revision": params["expected_revision"]}, request_id)
+    # The final membership replacement is frozen under the request-id before
+    # the write: a lost response retries the identical request bytes and the
+    # server replays the recorded outcome (R13).
+    frozen = transport.freeze_group_members(params, request_id)
+    return transport.invoke(
+        "group.set_members",
+        {
+            "group_id": params["group_id"],
+            "members": frozen["members"],
+            "expected_revision": frozen["expected_revision"],
+        },
+        request_id,
+    )
 
 
 def scrub(value, secrets):
@@ -890,6 +957,35 @@ def remote_exit(status: int) -> int:
     if status in {400, 413, 422}:
         return EXIT_INPUT
     return EXIT_REMOTE
+
+
+# Operation payloads can arrive over HTTP 200 with state=failed; the recorded
+# error code carries the semantic class (contracts.md section 7 exit codes).
+OPERATION_FAILURE_EXITS = {
+    "authentication_required": EXIT_AUTH,
+    "invalid_token": EXIT_AUTH,
+    "token_expired": EXIT_AUTH,
+    "token_revoked": EXIT_AUTH,
+    "action_forbidden": EXIT_FORBIDDEN,
+    "not_found": EXIT_FORBIDDEN,
+    "idempotency_conflict": EXIT_CONFLICT,
+    "revision_conflict": EXIT_CONFLICT,
+    "invalid_input": EXIT_INPUT,
+    "invalid_time": EXIT_INPUT,
+    "upload_too_large": EXIT_INPUT,
+}
+
+
+def state_exit(payload: dict, status: int) -> int:
+    """Exit code from a parsed business payload: failed maps through its
+    recorded error, pending stays pending, anything else succeeded."""
+    state = payload.get("state")
+    if state == "failed":
+        code = (payload.get("error") or {}).get("code")
+        return OPERATION_FAILURE_EXITS.get(code, EXIT_REMOTE)
+    if status == 202 or state in {"accepted", "processing", "pending", "running"}:
+        return EXIT_PENDING
+    return EXIT_SUCCESS
 
 
 def main(argv=None) -> int:
@@ -936,9 +1032,8 @@ def main(argv=None) -> int:
             raise CliError("invalid_response", "service response must be a JSON object", EXIT_REMOTE)
         if request_id:
             payload.setdefault("idempotency_key", request_id)
-        state = payload.get("state")
         emit(payload, secrets)
-        return EXIT_PENDING if status == 202 or state in {"accepted", "processing", "pending", "running"} else EXIT_SUCCESS
+        return state_exit(payload, status)
     except RemoteFailure as exc:
         payload = exc.payload if isinstance(exc.payload, dict) else {"code": "http_error", "message": f"service returned HTTP {exc.status}"}
         payload.setdefault("state", "error")

@@ -66,28 +66,51 @@ The command families are:
 - `group list`, `group create`, and `group member add|remove`
 
 Run `dashboard <command> --help` for flags. Group member changes read the
-current member set, verify the supplied group revision, and update it with CAS.
+current member set once, verify the supplied group revision, freeze the final
+replacement request under the request ID, and update it with CAS. A retry of
+the same command replays the frozen member list and revision — it never
+re-reads the group, so a lost response recovers the recorded outcome instead
+of failing on the revision the first success bumped.
 
 ## Output and exit codes
 
 Business results and errors are one JSON object on stdout. Diagnostics use
-stderr and never contain the loaded credential.
+stderr and never contain the loaded credential. Exit codes follow
+contracts.md section 7:
 
 | Code | Meaning |
 | ---: | --- |
-| 0 | Succeeded |
-| 10 | Accepted or pending |
-| 20 | Authentication required or expired |
-| 21 | Forbidden or not visible |
-| 30 | Revision, quota, or idempotency conflict |
-| 40 | Invalid input |
-| 50 | Write outcome unknown; query the original request ID |
-| 60 | Network failure on a read |
-| 70 | Other service/protocol failure |
+| 0 | Succeeded (including a replayed recorded success) |
+| 2 | Invalid input |
+| 3 | Authentication required, expired, or rejected |
+| 4 | Forbidden or not visible |
+| 5 | Conflict (revision, quota, idempotency key) |
+| 6 | Accepted/pending — query again with the same request ID |
+| 7 | Write outcome unknown; query the original request ID |
+| 8 | Network failure on a read |
+| 9 | Other service/protocol failure, including an operation that ended in
+  `state=failed` (mapped by its recorded error code when recognizable) |
+
+An `operation` query answering HTTP 200 with `state=failed` is NOT success:
+the CLI exits 3/4/5/9 by the recorded error and keeps the `request_id` in the
+output for recovery.
 
 The CLI never follows redirects and never accepts `--token`, an actor identity,
 or an arbitrary service URL. A timeout or transport break during a write returns
 `outcome_unknown` and the original `idempotency_key`.
+
+## Frozen requests and recovery
+
+Every write's exact bytes are frozen locally under
+`.aresclaw-dashboard/requests/<origin-hash>/<principal_id>/` before the first
+attempt, keyed by request ID and bound to the verified principal:
+
+- Retries of a publish or access-apply replay the frozen bytes even after the
+  source file is edited, moved, or deleted; the original file is read only
+  when a snapshot is first created.
+- The same user with a renewed token resumes their own snapshots; a different
+  user gets a separate namespace and never continues another user's request.
+- Snapshots contain no credentials.
 
 ## Tests
 

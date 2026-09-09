@@ -592,6 +592,151 @@ class DashboardCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 6)
         self.assertEqual(json.loads(result.stdout)["idempotency_key"], request_id)
 
+    # ------------------------------------------------- R13/R14/R15 fixes
+
+    def test_publish_retry_survives_deleted_source_file(self):
+        """R15: after freezing, the original HTML file is only needed for the
+        FIRST run; retries replay the frozen bytes even if the file is gone."""
+        html = b"<h1>snapshot-only</h1>"
+        (self.workdir / "gone.html").write_bytes(html)
+
+        def publish_response(_request):
+            return 200, {"Content-Type": "application/json"}, json.dumps({
+                "operation_id": "10000000-0000-4000-8000-000000000011",
+                "state": "succeeded",
+                "dashboard_id": "20000000-0000-4000-8000-000000000012",
+                "version_id": "30000000-0000-4000-8000-000000000013",
+                "revision": 1,
+            }).encode()
+
+        server = self.server(self.identity_responder(publish_response))
+        config = self.write_config(server.url)
+        request_id = "40000000-0000-4000-8000-000000000014"
+        args = ("publish", "--file", "gone.html", "--title", "T",
+                "--request-id", request_id)
+        first = self.run_cli(*args, config=config)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        (self.workdir / "gone.html").unlink()
+
+        second = self.run_cli(*args, config=config)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        body = json.loads(second.stdout)
+        self.assertEqual(body["state"], "succeeded")
+        posts = [r for r in server.requests if r["method"] == "POST"]
+        self.assertEqual(len(posts), 2)
+        self.assertIn(html, posts[-1]["body"])
+
+    def test_group_member_retry_replays_frozen_request(self):
+        """R13: a lost-response retry of the same group-member command must
+        reuse the frozen member list and revision (same key, same bytes) —
+        not re-read the group and die on the bumped revision."""
+        group_id = "70000000-0000-4000-8000-000000000001"
+        user_id = "80000000-0000-4000-8000-000000000002"
+        shows = {"n": 0}
+
+        def responder(request):
+            if request["path"] == f"/api/v1/groups/{group_id}":
+                shows["n"] += 1
+                # First read matches the caller's expected revision; ANY
+                # later read (there must be none) would see revision 99.
+                revision = 1 if shows["n"] == 1 else 99
+                return 200, {"Content-Type": "application/json"}, json.dumps({
+                    "id": group_id, "display_name": "G",
+                    "owner_principal_id": "svc-1", "revision": revision,
+                    "members": [] if shows["n"] == 1 else [user_id],
+                }).encode()
+            if request["method"] == "PUT":
+                return 200, {"Content-Type": "application/json"}, json.dumps({
+                    "operation_id": "10000000-0000-4000-8000-000000000021",
+                    "state": "succeeded",
+                    "group_id": group_id, "revision": 2,
+                }).encode()
+            raise AssertionError(f"unexpected request {request}")
+
+        server = self.server(self.identity_responder(responder))
+        config = self.write_config(server.url)
+        request_id = "40000000-0000-4000-8000-000000000022"
+        args = ("group", "member", "add", group_id, "--user-id", user_id,
+                "--expected-revision", "1", "--request-id", request_id)
+
+        first = self.run_cli(*args, config=config)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        # The response to the first PUT is "lost" (simulated by the retry);
+        # a plain re-run with the SAME command and key must recover.
+        second = self.run_cli(*args, config=config)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        body = json.loads(second.stdout)
+        self.assertEqual(body["state"], "succeeded")
+        puts = [r for r in server.requests if r["method"] == "PUT"]
+        self.assertEqual(len(puts), 2)
+        self.assertEqual(puts[0]["headers"]["Idempotency-Key"], request_id)
+        self.assertEqual(puts[1]["headers"]["Idempotency-Key"], request_id)
+        self.assertEqual(puts[0]["body"], puts[1]["body"],
+                         "retry must send the identical frozen request")
+        # The retry must not even re-read the group (frozen request, no GET).
+        shows = [r for r in server.requests
+                 if r["path"] == f"/api/v1/groups/{group_id}"]
+        self.assertEqual(len(shows), 1)
+
+    def test_operation_query_failed_maps_to_nonzero_exit(self):
+        """R14: HTTP 200 + state=failed is NOT success: the exit code reflects
+        the recorded failure."""
+        def responder(request):
+            if request["path"].startswith("/api/v1/operations"):
+                return 200, {"Content-Type": "application/json"}, json.dumps({
+                    "operation_id": "10000000-0000-4000-8000-000000000031",
+                    "request_id": "40000000-0000-4000-8000-000000000032",
+                    "state": "failed",
+                    "result": None,
+                    "error": {"code": "operation_interrupted",
+                              "message": "interrupted", "retryable": True},
+                }).encode()
+            raise AssertionError(f"unexpected {request}")
+
+        server = self.server(self.identity_responder(responder))
+        config = self.write_config(server.url)
+        result = self.run_cli("operation", "--request-id",
+                              "40000000-0000-4000-8000-000000000032",
+                              config=config)
+        self.assertEqual(json.loads(result.stdout)["state"], "failed")
+        self.assertEqual(result.returncode, 9)
+
+    def test_operation_query_failed_conflict_maps_to_conflict_exit(self):
+        def responder(request):
+            if request["path"].startswith("/api/v1/operations"):
+                return 200, {"Content-Type": "application/json"}, json.dumps({
+                    "operation_id": "10000000-0000-4000-8000-000000000041",
+                    "request_id": "40000000-0000-4000-8000-000000000042",
+                    "state": "failed", "result": None,
+                    "error": {"code": "revision_conflict",
+                              "message": "changed", "retryable": False},
+                }).encode()
+            raise AssertionError(f"unexpected {request}")
+
+        server = self.server(self.identity_responder(responder))
+        config = self.write_config(server.url)
+        result = self.run_cli("operation", "--request-id",
+                              "40000000-0000-4000-8000-000000000042",
+                              config=config)
+        self.assertEqual(result.returncode, 5)
+
+    def test_operation_query_pending_stays_pending_exit(self):
+        def responder(request):
+            if request["path"].startswith("/api/v1/operations"):
+                return 200, {"Content-Type": "application/json"}, json.dumps({
+                    "operation_id": "10000000-0000-4000-8000-000000000051",
+                    "request_id": "40000000-0000-4000-8000-000000000052",
+                    "state": "processing", "result": None, "error": None,
+                }).encode()
+            raise AssertionError(f"unexpected {request}")
+
+        server = self.server(self.identity_responder(responder))
+        config = self.write_config(server.url)
+        result = self.run_cli("operation", "--request-id",
+                              "40000000-0000-4000-8000-000000000052",
+                              config=config)
+        self.assertEqual(result.returncode, 6)
+
 
 if __name__ == "__main__":
     unittest.main()

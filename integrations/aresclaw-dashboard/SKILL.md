@@ -24,9 +24,17 @@ Updates also require the dashboard's current `revision` as
 dashboard operation --request-id 2a4b9b27-1e98-4fa8-b285-63db7c87a692
 ```
 
-Do not retry an unknown write with a new UUID. The CLI freezes publish bytes and access-change JSON by request ID, bound to the verified
-principal from `/me` and the fixed service origin. The default human mode reads the
-environment's current-user token file fresh on every run.
+Do not retry an unknown write with a new UUID. The CLI freezes publish bytes,
+access-change JSON, and group-member replacements by request ID, bound to the
+verified principal from `/me` and the fixed service origin; a retry reuses the
+frozen bytes even if the source file has since changed or disappeared. The
+default human mode reads the environment's current-user token file fresh on
+every run.
+
+Read the CLI's exit code, not just its text: HTTP 200 with
+`state=failed` still exits non-zero (3/4/5/9 by the recorded error). Exit 6
+means still processing — query the same request ID again; exit 7 means the
+outcome is unknown — also query, never re-run with a new UUID.
 
 Resolve people and groups with
 `dashboard principals --type user|service|group --query ...`, then use the
