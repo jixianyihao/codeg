@@ -7,6 +7,7 @@ import {
   ListChevronsDownUp,
   ListChevronsUpDown,
   LayoutTemplate,
+  LayoutDashboard,
   ListTodo,
   Menu,
   MessagesSquare,
@@ -103,6 +104,7 @@ const NAV_ITEM_ICONS: Record<SidebarNavItemId, LucideIcon> = {
   automations: Zap,
   tasks: ListTodo,
   forge: LayoutTemplate,
+  dashboards: LayoutDashboard,
 }
 
 /**
@@ -438,7 +440,9 @@ export function Sidebar() {
                     status bar's quick-actions menu still reaches every route, so
                     no choice here can strand the user on a page. */}
                 <DropdownMenuSubContent>
-                  {SIDEBAR_NAV_ITEM_IDS.map((id) => {
+                  {SIDEBAR_NAV_ITEM_IDS.filter(
+                    (id) => id !== "dashboards" || !isDesktop()
+                  ).map((id) => {
                     const Icon = NAV_ITEM_ICONS[id]
                     return (
                       <DropdownMenuCheckboxItem
@@ -553,6 +557,17 @@ export function Sidebar() {
                 </span>
               ) : null
             }
+          />
+        )}
+        {!isDesktop() && isNavItemVisible(navItems, "dashboards") && (
+          <SidebarNavButton
+            icon={LayoutDashboard}
+            label={t("dashboards")}
+            active={routeId === "dashboards"}
+            onClick={() => {
+              if (isMobile) toggle()
+              setRoute("dashboards")
+            }}
           />
         )}
         {isNavItemVisible(navItems, "forge") && (

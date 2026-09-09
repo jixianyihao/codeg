@@ -1729,7 +1729,8 @@
       "automations": "Automatizaciones",
       "tasks": "Tareas pendientes",
       "loadingSubsessions": "Cargando subconversaciones…",
-      "forge": "Panel del repositorio"
+      "forge": "Panel del repositorio",
+      "dashboards": "Paneles"
     },
     "conversation": {
       "reloadFailed": "No se pudo recargar la conversación: {message}",
@@ -5195,5 +5196,33 @@
     "settingsPromptScenarioHint": "Va solo en las tareas creadas con este escenario.",
     "settingsPromptPlaceholder": "p. ej.: Responde en español. Ejecuta las pruebas del proyecto antes de terminar.",
     "save": "Guardar"
+  },
+  "Dashboards": {
+    "title": "Paneles",
+    "description": "Consulta los paneles publicados en sus páginas independientes.",
+    "mine": "Creados por mí",
+    "shared": "Compartidos conmigo",
+    "all": "Todos los visibles",
+    "search": "Buscar paneles",
+    "refresh": "Actualizar",
+    "loading": "Cargando paneles…",
+    "empty": "No hay paneles visibles",
+    "error": "No se pueden cargar los paneles",
+    "notConfigured": "Configura primero el servicio de paneles.",
+    "open": "Abrir panel",
+    "copy": "Copiar enlace",
+    "copied": "Enlace copiado",
+    "more": "Cargar más",
+    "published": "Publicado",
+    "archived": "Archivado",
+    "status": "Estado",
+    "owner": "Propietario",
+    "editor": "Editor",
+    "viewer": "Lector",
+    "service": "Cuenta de integración",
+    "expires": "El acceso caduca",
+    "publishedAt": "Fecha de publicación",
+    "webOnly": "Solo disponible en modo web",
+    "invalidLink": "Enlace no disponible"
   }
 }

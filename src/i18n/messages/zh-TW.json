@@ -1729,7 +1729,8 @@
       "automations": "自動化",
       "tasks": "待辦任務",
       "loadingSubsessions": "正在載入子會話…",
-      "forge": "儲存庫面板"
+      "forge": "儲存庫面板",
+      "dashboards": "看板"
     },
     "conversation": {
       "reloadFailed": "會話重新載入失敗：{message}",
@@ -5195,5 +5196,33 @@
     "settingsPromptScenarioHint": "只有這個情境建立的任務才會帶上。",
     "settingsPromptPlaceholder": "例如：用繁體中文回覆；完成前先跑一次專案的測試。",
     "save": "儲存"
+  },
+  "Dashboards": {
+    "title": "看板",
+    "description": "瀏覽已發布的看板，開啟獨立頁面查看詳情。",
+    "mine": "我建立的",
+    "shared": "分享給我",
+    "all": "全部可見",
+    "search": "搜尋看板",
+    "refresh": "重新整理",
+    "loading": "正在載入看板…",
+    "empty": "沒有可見看板",
+    "error": "無法載入看板",
+    "notConfigured": "請先設定看板服務。",
+    "open": "開啟看板",
+    "copy": "複製連結",
+    "copied": "已複製連結",
+    "more": "載入更多",
+    "published": "已發布",
+    "archived": "已下架",
+    "status": "狀態",
+    "owner": "擁有者",
+    "editor": "編輯者",
+    "viewer": "檢視者",
+    "service": "整合帳號",
+    "expires": "存取到期",
+    "publishedAt": "發布時間",
+    "webOnly": "僅支援網頁模式",
+    "invalidLink": "檢視連結無法使用"
   }
 }

@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>看板 · AresClaw</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/auth-provider.js" defer></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳转到看板</a>
+    <header class="site-header">
+      <span class="brand"
+        ><span class="brand-mark" aria-hidden="true">A</span>AresClaw
+        <span class="brand-divider">/</span> 看板</span
+      >
+      <span id="identity" class="muted">正在验证身份…</span>
+    </header>
+    <main id="main">
+      <div
+        id="feedback"
+        class="notice"
+        role="status"
+        aria-live="polite"
+        hidden
+      ></div>
+      <div id="recovery" class="recovery" hidden>
+        <button id="reload" type="button">重新加载 / 登录</button>
+        <button id="retry-write" type="button" hidden>重试原操作</button>
+      </div>
+      <div id="loading" class="empty-state" role="status">正在加载看板…</div>
+      <div id="dashboard" hidden>
+        <section class="dashboard-heading" aria-labelledby="dashboard-title">
+          <div>
+            <div class="eyebrow">
+              独立看板空间 <span id="status" class="badge"></span>
+            </div>
+            <h1 id="dashboard-title"></h1>
+            <p id="description" class="description"></p>
+            <div class="metadata">
+              <span id="owner"></span><span id="role" class="badge"></span>
+              <span id="published-at"></span><span id="access-expiry"></span>
+            </div>
+          </div>
+          <div class="actions">
+            <button id="copy-link" type="button">复制链接</button>
+            <button id="edit-metadata" type="button" data-editor hidden>
+              编辑信息
+            </button>
+            <button
+              id="archive"
+              class="danger-outline"
+              type="button"
+              data-owner
+              hidden
+            >
+              下架看板
+            </button>
+          </div>
+        </section>
+        <div class="workspace">
+          <section class="viewer-panel" aria-labelledby="viewer-heading">
+            <div class="panel-heading">
+              <h2 id="viewer-heading">当前内容</h2>
+              <button id="refresh-view" class="quiet" type="button">
+                重新加载内容
+              </button>
+            </div>
+            <p class="snapshot-note">
+              内容为发布时的静态快照，图表交互不会更新源数据。
+            </p>
+            <div id="viewer-status" class="empty-state" role="status">
+              正在准备查看器…
+            </div>
+            <div id="viewer"></div>
+          </section>
+          <aside class="side-panels">
+            <section class="panel" aria-labelledby="versions-heading">
+              <div class="panel-heading">
+                <h2 id="versions-heading">版本历史</h2>
+                <span id="version-count" class="muted"></span>
+              </div>
+              <p class="help">历史版本与当前版本使用相同的访问权限。</p>
+              <ol id="versions" class="version-list"></ol>
+              <button id="more-versions" class="quiet" type="button" hidden>
+                加载更多版本
+              </button>
+            </section>
+            <section
+              id="sharing-panel"
+              class="panel"
+              aria-labelledby="sharing-heading"
+              data-owner
+              hidden
+            >
+              <div class="panel-heading">
+                <h2 id="sharing-heading">访问权限</h2>
+                <span class="badge">所有者管理</span>
+              </div>
+              <p class="help">
+                用户、服务账号和群组授权均仅适用于此看板。删除一条授权后，其他有效授权仍然生效。
+              </p>
+              <div id="grants" class="grant-list"></div>
+              <details id="grant-details">
+                <summary>添加或修改授权</summary>
+                <form id="grant-form">
+                  <label
+                    >授权对象类型<select id="principal-type">
+                      <option value="user">企业用户</option>
+                      <option value="service">服务账号</option>
+                      <option value="group">本地用户群组</option>
+                    </select></label
+                  >
+                  <label
+                    >搜索对象<input
+                      id="principal-query"
+                      autocomplete="off"
+                      placeholder="输入名称搜索"
+                      maxlength="200"
+                  /></label>
+                  <button id="search-principals" type="button">搜索</button>
+                  <div
+                    id="principal-results"
+                    class="search-results"
+                    role="group"
+                    aria-label="搜索结果"
+                  ></div>
+                  <p id="selected-principal" class="help">
+                    请从真实目录结果中选择对象。
+                  </p>
+                  <label
+                    >权限<select id="grant-role">
+                      <option value="viewer">查看者</option>
+                      <option value="editor">编辑者</option>
+                    </select></label
+                  >
+                  <label
+                    >生效时间（留空立即生效）<input
+                      id="grant-start"
+                      type="datetime-local"
+                  /></label>
+                  <label
+                    >有效期<select id="grant-duration">
+                      <option value="forever">长期</option>
+                      <option value="1">1 天</option>
+                      <option value="7">7 天</option>
+                      <option value="custom">自定义</option>
+                    </select></label
+                  >
+                  <label id="grant-end-label" hidden
+                    >到期时间<input id="grant-end" type="datetime-local"
+                  /></label>
+                  <p class="timezone help"></p>
+                  <button type="submit" class="primary">保存授权</button>
+                </form>
+              </details>
+              <div class="section-divider"></div>
+              <form id="public-form">
+                <label class="checkbox-label"
+                  ><input
+                    id="public-enabled"
+                    type="checkbox"
+                  />企业内公开</label
+                >
+                <p class="help">
+                  所有已认证的企业用户均可查看，包括所有历史版本。服务账号不会因公开而获得访问权。
+                </p>
+                <label
+                  >公开生效时间（留空立即生效）<input
+                    id="public-start"
+                    type="datetime-local"
+                /></label>
+                <label
+                  >公开到期时间（留空长期有效）<input
+                    id="public-end"
+                    type="datetime-local"
+                /></label>
+                <p class="timezone help"></p>
+                <button type="submit">保存公开设置</button>
+              </form>
+            </section>
+          </aside>
+        </div>
+      </div>
+    </main>
+    <dialog id="metadata-dialog" aria-labelledby="metadata-heading">
+      <form id="metadata-form">
+        <h2 id="metadata-heading">编辑看板信息</h2>
+        <label
+          >标题<input id="metadata-title" required maxlength="200"
+        /></label>
+        <label
+          >摘要<textarea
+            id="metadata-description"
+            rows="4"
+            maxlength="2000"
+          ></textarea>
+        </label>
+        <p class="help">修改信息不会更新已发布的 HTML 内容。</p>
+        <div class="actions">
+          <button type="button" data-close="metadata-dialog">取消</button
+          ><button class="primary" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="confirm-dialog" aria-labelledby="confirm-heading">
+      <h2 id="confirm-heading"></h2>
+      <p id="confirm-description"></p>
+      <div class="actions">
+        <button type="button" data-close="confirm-dialog">取消</button
+        ><button id="confirm-action" class="primary" type="button">确认</button>
+      </div>
+    </dialog>
+  </body>
+</html>

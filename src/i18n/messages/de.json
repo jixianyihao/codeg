@@ -1729,7 +1729,8 @@
       "automations": "Automatisierungen",
       "tasks": "To-dos",
       "loadingSubsessions": "Unterkonversationen werden geladen…",
-      "forge": "Repository-Panel"
+      "forge": "Repository-Panel",
+      "dashboards": "Dashboards"
     },
     "conversation": {
       "reloadFailed": "Konversation konnte nicht neu geladen werden: {message}",
@@ -5195,5 +5196,33 @@
     "settingsPromptScenarioHint": "Geht nur an Aufgaben, die mit diesem Szenario erstellt wurden.",
     "settingsPromptPlaceholder": "z. B.: Antworte auf Deutsch. Führe vor dem Abschluss die Tests des Projekts aus.",
     "save": "Speichern"
+  },
+  "Dashboards": {
+    "title": "Dashboards",
+    "description": "Veröffentlichte Dashboards auf eigenständigen Seiten öffnen.",
+    "mine": "Von mir erstellt",
+    "shared": "Mit mir geteilt",
+    "all": "Alle sichtbaren",
+    "search": "Dashboards suchen",
+    "refresh": "Aktualisieren",
+    "loading": "Dashboards werden geladen…",
+    "empty": "Keine sichtbaren Dashboards",
+    "error": "Dashboards konnten nicht geladen werden",
+    "notConfigured": "Bitte zuerst den Dashboard-Dienst konfigurieren.",
+    "open": "Dashboard öffnen",
+    "copy": "Link kopieren",
+    "copied": "Link kopiert",
+    "more": "Mehr laden",
+    "published": "Veröffentlicht",
+    "archived": "Archiviert",
+    "status": "Status",
+    "owner": "Eigentümer",
+    "editor": "Bearbeiter",
+    "viewer": "Betrachter",
+    "service": "Integrationskonto",
+    "expires": "Zugriff endet",
+    "publishedAt": "Veröffentlicht am",
+    "webOnly": "Nur im Webmodus verfügbar",
+    "invalidLink": "Dashboard-Link nicht verfügbar"
   }
 }

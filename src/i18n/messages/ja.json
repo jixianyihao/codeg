@@ -1729,7 +1729,8 @@
       "automations": "オートメーション",
       "tasks": "ToDo タスク",
       "loadingSubsessions": "サブ会話を読み込み中…",
-      "forge": "リポジトリパネル"
+      "forge": "リポジトリパネル",
+      "dashboards": "ダッシュボード"
     },
     "conversation": {
       "reloadFailed": "会話の再読み込みに失敗しました: {message}",
@@ -5195,5 +5196,33 @@
     "settingsPromptScenarioHint": "このシナリオで作られたタスクにだけ付きます。",
     "settingsPromptPlaceholder": "例：日本語で回答する。終了前にプロジェクトのテストを実行する。",
     "save": "保存"
+  },
+  "Dashboards": {
+    "title": "ダッシュボード",
+    "description": "公開済みのダッシュボードを独立したページで表示します。",
+    "mine": "自分が作成",
+    "shared": "共有されたもの",
+    "all": "表示可能なすべて",
+    "search": "ダッシュボードを検索",
+    "refresh": "更新",
+    "loading": "読み込み中…",
+    "empty": "表示できるダッシュボードはありません",
+    "error": "ダッシュボードを読み込めません",
+    "notConfigured": "ダッシュボードサービスを設定してください。",
+    "open": "ダッシュボードを開く",
+    "copy": "リンクをコピー",
+    "copied": "コピーしました",
+    "more": "さらに読み込む",
+    "published": "公開中",
+    "archived": "アーカイブ済み",
+    "status": "状態",
+    "owner": "所有者",
+    "editor": "編集者",
+    "viewer": "閲覧者",
+    "service": "連携アカウント",
+    "expires": "アクセス期限",
+    "publishedAt": "公開日時",
+    "webOnly": "Web モードのみ対応",
+    "invalidLink": "リンクを利用できません"
   }
 }

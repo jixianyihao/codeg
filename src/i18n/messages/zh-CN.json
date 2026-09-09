@@ -1729,7 +1729,8 @@
       "automations": "自动化",
       "tasks": "待办任务",
       "loadingSubsessions": "正在加载子会话…",
-      "forge": "仓库面板"
+      "forge": "仓库面板",
+      "dashboards": "看板"
     },
     "conversation": {
       "reloadFailed": "会话重新加载失败：{message}",
@@ -5195,5 +5196,33 @@
     "settingsPromptScenarioHint": "只有这个场景创建的任务才会带上。",
     "settingsPromptPlaceholder": "例如：用中文回复；完成前先跑一遍项目的测试。",
     "save": "保存"
+  },
+  "Dashboards": {
+    "title": "看板",
+    "description": "浏览已发布的看板，打开独立页面查看详情。",
+    "mine": "我创建的",
+    "shared": "分享给我",
+    "all": "全部可见",
+    "search": "搜索看板",
+    "refresh": "刷新",
+    "loading": "正在加载看板…",
+    "empty": "没有可见看板",
+    "error": "无法加载看板",
+    "notConfigured": "请先配置看板服务。",
+    "open": "打开看板",
+    "copy": "复制链接",
+    "copied": "已复制链接",
+    "more": "加载更多",
+    "published": "已发布",
+    "archived": "已下架",
+    "status": "状态",
+    "owner": "所有者",
+    "editor": "编辑者",
+    "viewer": "查看者",
+    "service": "集成账号",
+    "expires": "访问到期",
+    "publishedAt": "发布时间",
+    "webOnly": "仅支持网页模式",
+    "invalidLink": "查看链接不可用"
   }
 }

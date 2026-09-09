@@ -1729,7 +1729,8 @@
       "automations": "Automations",
       "tasks": "To-dos",
       "loadingSubsessions": "Loading sub-conversations…",
-      "forge": "Repository panel"
+      "forge": "Repository panel",
+      "dashboards": "Dashboards"
     },
     "conversation": {
       "reloadFailed": "Failed to reload conversation: {message}",
@@ -5195,5 +5196,33 @@
     "settingsPromptScenarioHint": "Sent only with tasks created for this scenario.",
     "settingsPromptPlaceholder": "e.g. Reply in English. Run the project's tests before you finish.",
     "save": "Save"
+  },
+  "Dashboards": {
+    "title": "Dashboards",
+    "description": "Browse published dashboards and open their independent pages.",
+    "mine": "Created by me",
+    "shared": "Shared with me",
+    "all": "All visible",
+    "search": "Search dashboards",
+    "refresh": "Refresh",
+    "loading": "Loading dashboards…",
+    "empty": "No visible dashboards",
+    "error": "Unable to load dashboards",
+    "notConfigured": "Configure the dashboard service to get started.",
+    "open": "Open dashboard",
+    "copy": "Copy link",
+    "copied": "Link copied",
+    "more": "Load more",
+    "published": "Published",
+    "archived": "Archived",
+    "status": "Status",
+    "owner": "Owner",
+    "editor": "Editor",
+    "viewer": "Viewer",
+    "service": "Integration account",
+    "expires": "Access expires",
+    "publishedAt": "Published",
+    "webOnly": "Available in Web mode only",
+    "invalidLink": "Dashboard link unavailable"
   }
 }

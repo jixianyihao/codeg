@@ -1729,7 +1729,8 @@
       "automations": "Automatisations",
       "tasks": "Tâches à faire",
       "loadingSubsessions": "Chargement des sous-conversations…",
-      "forge": "Panneau du dépôt"
+      "forge": "Panneau du dépôt",
+      "dashboards": "Tableaux de bord"
     },
     "conversation": {
       "reloadFailed": "Échec du rechargement de la conversation : {message}",
@@ -5195,5 +5196,33 @@
     "settingsPromptScenarioHint": "Envoyé uniquement avec les tâches créées dans ce scénario.",
     "settingsPromptPlaceholder": "ex. : Réponds en français. Lance les tests du projet avant de terminer.",
     "save": "Enregistrer"
+  },
+  "Dashboards": {
+    "title": "Tableaux de bord",
+    "description": "Consultez les tableaux publiés sur leurs pages indépendantes.",
+    "mine": "Créés par moi",
+    "shared": "Partagés avec moi",
+    "all": "Tous les éléments visibles",
+    "search": "Rechercher un tableau",
+    "refresh": "Actualiser",
+    "loading": "Chargement des tableaux…",
+    "empty": "Aucun tableau visible",
+    "error": "Impossible de charger les tableaux",
+    "notConfigured": "Configurez le service de tableaux de bord.",
+    "open": "Ouvrir le tableau",
+    "copy": "Copier le lien",
+    "copied": "Lien copié",
+    "more": "Charger plus",
+    "published": "Publié",
+    "archived": "Archivé",
+    "status": "État",
+    "owner": "Propriétaire",
+    "editor": "Éditeur",
+    "viewer": "Lecteur",
+    "service": "Compte d’intégration",
+    "expires": "Expiration de l’accès",
+    "publishedAt": "Date de publication",
+    "webOnly": "Disponible uniquement en mode Web",
+    "invalidLink": "Lien indisponible"
   }
 }

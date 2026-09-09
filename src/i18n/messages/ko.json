@@ -1729,7 +1729,8 @@
       "automations": "자동화",
       "tasks": "할 일",
       "loadingSubsessions": "하위 대화 로드 중…",
-      "forge": "리포지토리 패널"
+      "forge": "리포지토리 패널",
+      "dashboards": "대시보드"
     },
     "conversation": {
       "reloadFailed": "대화 다시 불러오기 실패: {message}",
@@ -5195,5 +5196,33 @@
     "settingsPromptScenarioHint": "이 시나리오로 만든 작업에만 붙습니다.",
     "settingsPromptPlaceholder": "예: 한국어로 답하세요. 끝내기 전에 프로젝트 테스트를 실행하세요.",
     "save": "저장"
+  },
+  "Dashboards": {
+    "title": "대시보드",
+    "description": "게시된 대시보드를 찾아 독립 페이지에서 확인하세요.",
+    "mine": "내가 만든 항목",
+    "shared": "공유받은 항목",
+    "all": "모든 표시 항목",
+    "search": "대시보드 검색",
+    "refresh": "새로 고침",
+    "loading": "불러오는 중…",
+    "empty": "표시할 대시보드가 없습니다",
+    "error": "대시보드를 불러올 수 없습니다",
+    "notConfigured": "대시보드 서비스를 설정해 주세요.",
+    "open": "대시보드 열기",
+    "copy": "링크 복사",
+    "copied": "링크가 복사되었습니다",
+    "more": "더 불러오기",
+    "published": "게시됨",
+    "archived": "보관됨",
+    "status": "상태",
+    "owner": "소유자",
+    "editor": "편집자",
+    "viewer": "뷰어",
+    "service": "통합 계정",
+    "expires": "접근 만료",
+    "publishedAt": "게시 시간",
+    "webOnly": "웹 모드에서만 사용 가능",
+    "invalidLink": "링크를 사용할 수 없습니다"
   }
 }

@@ -2,6 +2,10 @@
 
 import type { ComponentType } from "react"
 import {
+  DashboardsPage,
+  DashboardsPageTitle,
+} from "@/components/dashboards/dashboard-page"
+import {
   useWorkbenchRoute,
   type WorkbenchRouteId,
 } from "@/contexts/workbench-route-context"
@@ -30,6 +34,7 @@ const WORKBENCH_ROUTES: Partial<Record<WorkbenchRouteId, ComponentType>> = {
   tasks: TasksPage,
   forge: ForgePage,
   tokenUsage: TokenUsagePage,
+  dashboards: DashboardsPage,
 }
 
 /** Optional per-route content for the window-chrome strip above the page
@@ -40,6 +45,7 @@ const WORKBENCH_ROUTE_STRIPS: Partial<Record<WorkbenchRouteId, ComponentType>> =
     tasks: TasksPageTitle,
     forge: ForgePageTitle,
     tokenUsage: TokenUsagePageTitle,
+    dashboards: DashboardsPageTitle,
   }
 
 /** What a chrome cluster hands its route's buttons: the host's own button

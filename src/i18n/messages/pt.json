@@ -1729,7 +1729,8 @@
       "automations": "Automações",
       "tasks": "Tarefas a fazer",
       "loadingSubsessions": "Carregando subconversas…",
-      "forge": "Painel do repositório"
+      "forge": "Painel do repositório",
+      "dashboards": "Painéis"
     },
     "conversation": {
       "reloadFailed": "Falha ao recarregar conversa: {message}",
@@ -5195,5 +5196,33 @@
     "settingsPromptScenarioHint": "Vai só nas tarefas criadas com este cenário.",
     "settingsPromptPlaceholder": "ex.: Responda em português. Rode os testes do projeto antes de terminar.",
     "save": "Salvar"
+  },
+  "Dashboards": {
+    "title": "Painéis",
+    "description": "Consulte os painéis publicados nas suas páginas independentes.",
+    "mine": "Criados por mim",
+    "shared": "Partilhados comigo",
+    "all": "Todos os visíveis",
+    "search": "Pesquisar painéis",
+    "refresh": "Atualizar",
+    "loading": "A carregar painéis…",
+    "empty": "Nenhum painel visível",
+    "error": "Não foi possível carregar os painéis",
+    "notConfigured": "Configure primeiro o serviço de painéis.",
+    "open": "Abrir painel",
+    "copy": "Copiar ligação",
+    "copied": "Ligação copiada",
+    "more": "Carregar mais",
+    "published": "Publicado",
+    "archived": "Arquivado",
+    "status": "Estado",
+    "owner": "Proprietário",
+    "editor": "Editor",
+    "viewer": "Leitor",
+    "service": "Conta de integração",
+    "expires": "Acesso expira",
+    "publishedAt": "Data de publicação",
+    "webOnly": "Disponível apenas no modo Web",
+    "invalidLink": "Ligação indisponível"
   }
 }
