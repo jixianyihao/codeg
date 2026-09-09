@@ -31,7 +31,7 @@ export function DashboardsPage() {
   const [query, setQuery] = useState("")
   const [page, setPage] = useState<DashboardPage | null>(null)
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState("")
+  const [error, setError] = useState<"error" | "notConfigured" | null>(null)
   const [notice, setNotice] = useState("")
   const request = useRef(0)
   const identity = useRef("")
@@ -43,7 +43,7 @@ export function DashboardsPage() {
       const ticket = ++request.current
       identity.current = getCodegToken()
       setLoading(true)
-      setError("")
+      setError(null)
       setNotice("")
       if (!cursor) setPage(null)
       try {
@@ -65,7 +65,7 @@ export function DashboardsPage() {
         setError(
           message.includes("dashboard_not_configured")
             ? "notConfigured"
-            : "error"
+            : ("error" as const),
         )
       } finally {
         if (ticket === request.current) setLoading(false)
@@ -187,14 +187,14 @@ export function DashboardsPage() {
             </Button>
           </form>
         </div>
-        {error && (
+        {error ? (
           <p
             role="alert"
             className="rounded-xl border border-destructive/30 p-5 text-sm text-destructive"
           >
             {t(error)}
           </p>
-        )}
+        ) : null}
         {notice && (
           <p role="status" className="text-sm text-muted-foreground">
             {notice}
