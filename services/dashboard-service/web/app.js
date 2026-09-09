@@ -629,6 +629,24 @@
         )
     )
   })
+  $("fullscreen-view").addEventListener("click", async () => {
+    // Open the pure render page on the content origin: full viewport,
+    // sandboxed generated HTML only — no management chrome.
+    if (!dashboard || dashboard.status === "archived") return
+    notice("正在打开全屏视图…")
+    try {
+      const result = await api(`${base}/view-capabilities`, {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({}),
+      })
+      window.open(result.render_url, "_blank", "noopener,noreferrer")
+      notice("已在新标签页打开全屏视图。")
+    } catch (error) {
+      notice(errorMessage(error), true)
+    }
+  })
+
   $("search-principals").addEventListener("click", searchPrincipals)
   $("principal-query").addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
