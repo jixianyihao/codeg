@@ -25,7 +25,8 @@ import {
 } from "@/contexts/acp-connections-context"
 import { DelegationProvider } from "@/contexts/delegation-context"
 import { ConversationRuntimeProvider } from "@/contexts/conversation-runtime-context"
-import { TabProvider, useTabStore, useTabActions } from "@/contexts/tab-context"
+import { TabProvider, useTabStore } from "@/contexts/tab-context"
+import { WorkbenchRouteConversationSync } from "@/components/workspace/workbench-route-conversation-sync"
 import { selectIsSplit } from "@/stores/tab-store"
 import { SidebarProvider, useSidebarContext } from "@/contexts/sidebar-context"
 import { SearchDialogProvider } from "@/contexts/search-dialog-context"
@@ -1237,32 +1238,6 @@ function FolderLayoutShell({ children }: { children: React.ReactNode }) {
       />
     </div>
   )
-}
-
-// Single chokepoint that keeps the workbench route honest: opening or switching
-// to a conversation from ANY entry point (sidebar, ⌘T, search, deep links, pet
-// focus, branch switch, run history …) activates a tab, so leaving a non-default
-// route whenever activeTabId changes covers every opener — present and future —
-// without patching each call site. Re-selecting the ALREADY-active tab does not
-// change activeTabId, so the interactive conversation pickers (sidebar list,
-// search dialog, run history) also call openConversations() directly.
-function WorkbenchRouteConversationSync() {
-  const activeTabId = useTabStore((s) => s.activeTabId)
-  const { consumeRemoteActivation } = useTabActions()
-  const { openConversations } = useWorkbenchRoute()
-  const prevRef = useRef(activeTabId)
-  useEffect(() => {
-    if (prevRef.current === activeTabId) return
-    prevRef.current = activeTabId
-    // A remote tab snapshot that mirrors another client's focus also changes
-    // activeTabId. That's not a local conversation activation, so don't hijack
-    // this window into the conversations route — doing so would unmount whatever
-    // non-conversation view it's on (e.g. the Automations editor + unsaved
-    // edits). Local activations leave the flag false and switch as before.
-    if (consumeRemoteActivation()) return
-    openConversations()
-  }, [activeTabId, openConversations, consumeRemoteActivation])
-  return null
 }
 
 function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {

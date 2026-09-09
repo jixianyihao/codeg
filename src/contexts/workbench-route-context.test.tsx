@@ -43,4 +43,20 @@ describe("WorkbenchRouteProvider", () => {
     expect(() => render(<Probe />)).toThrow(/WorkbenchRouteProvider/)
     spy.mockRestore()
   })
+
+  it("honors the static dashboard compatibility link without changing other routes", () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/workspace?view=dashboards&dashboard=board-1"
+    )
+    const { getByTestId, unmount } = render(
+      <WorkbenchRouteProvider>
+        <Probe />
+      </WorkbenchRouteProvider>
+    )
+    expect(getByTestId("route")).toHaveTextContent("dashboards")
+    unmount()
+    window.history.replaceState(null, "", "/workspace")
+  })
 })

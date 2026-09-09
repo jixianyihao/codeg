@@ -4,6 +4,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useSyncExternalStore,
   useMemo,
   useState,
   type ReactNode,
@@ -45,9 +46,9 @@ const WorkbenchRouteContext = createContext<WorkbenchRouteContextValue | null>(
  * (which unmounts when collapsed) while the content swap is owned by
  * WorkspaceContent — both read this single source of truth.
  *
- * State is in-memory only: a reload lands back on the conversation workspace.
- * That is deliberate; static export rules out URL route segments, and the
- * established pattern here is in-memory context rather than query params.
+ * Navigation is in memory. On a fresh load, the compatibility query
+ * `view=dashboards` opens the dashboard list; otherwise conversations open.
+ * Query parameters keep this entry compatible with Next static export.
  */
 export function useWorkbenchRoute() {
   const ctx = useContext(WorkbenchRouteContext)
@@ -59,8 +60,24 @@ export function useWorkbenchRoute() {
   return ctx
 }
 
+const subscribeInitialRoute = () => () => {}
+const initialBrowserRoute = (): WorkbenchRouteId =>
+  new URLSearchParams(window.location.search).get("view") === "dashboards"
+    ? "dashboards"
+    : "conversations"
+const initialServerRoute = (): WorkbenchRouteId => "conversations"
+
 export function WorkbenchRouteProvider({ children }: { children: ReactNode }) {
-  const [routeId, setRouteId] = useState<WorkbenchRouteId>("conversations")
+  // useSyncExternalStore supplies a stable server snapshot for static export,
+  // then reads the compatibility query without a hydration mismatch. Explicit
+  // navigation always overrides this initial route.
+  const initialRoute = useSyncExternalStore(
+    subscribeInitialRoute,
+    initialBrowserRoute,
+    initialServerRoute
+  )
+  const [routeOverride, setRouteId] = useState<WorkbenchRouteId | null>(null)
+  const routeId = routeOverride ?? initialRoute
 
   const setRoute = useCallback((id: WorkbenchRouteId) => setRouteId(id), [])
   const openConversations = useCallback(() => setRouteId("conversations"), [])
