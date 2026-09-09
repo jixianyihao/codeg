@@ -331,6 +331,8 @@ def test_operation_queries_hide_unpublished_result_and_redact_draft_ids_after_do
         assert response.status_code == 200, response.text
         result = response.json()["result"]
         assert result["draft_version_id"] is None and result["draft_version_number"] is None
+        assert result.get("draft_version_sha256") is None
+        assert result.get("draft_version_byte_size") is None
         assert result["has_draft"] is False
         assert result["version_id"] == published["result"]["version_id"]
 

@@ -18,7 +18,15 @@ const browserPath =
   ].find(existsSync)
 const id = "11111111-1111-4111-8111-111111111111"
 const version = "22222222-2222-4222-8222-222222222222"
-let chrome, cdp, profile, control, content, origin, contentOrigin
+let chrome,
+  cdp,
+  profile,
+  control,
+  content,
+  destination,
+  origin,
+  contentOrigin,
+  destinationOrigin
 let role = "viewer",
   denied = false,
   recorded = [],
@@ -33,6 +41,7 @@ const browserErrors = []
 let sequence = 0
 const waiting = new Map()
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const destinationRequests = []
 
 // Real response policies mirrored from dashboard_service.app/content_app so
 // the browser exercises the actual CSP the service ships (R12 verification).
@@ -142,6 +151,14 @@ async function start(handler) {
 
 before(async () => {
   assert.ok(browserPath, "Set DASHBOARD_TEST_BROWSER to a Chromium executable")
+  destination = await start((req, res) => {
+    destinationRequests.push({ url: req.url, headers: req.headers })
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
+    res.end(
+      "<!doctype html><title>Local link destination</title><h1>Opened</h1>"
+    )
+  })
+  destinationOrigin = `http://127.0.0.1:${destination.address().port}`
   content = await start(async (req, res) => {
     const url = new URL(req.url, "http://localhost")
     recorded.push({
@@ -357,7 +374,7 @@ after(async () => {
     })
   }
   await Promise.all(
-    [control, content]
+    [control, content, destination]
       .filter(Boolean)
       .map((server) => new Promise((resolve) => server.close(resolve)))
   )
@@ -369,6 +386,336 @@ after(async () => {
       retryDelay: 100,
     })
   }
+})
+
+async function loadLinkFixture(markup, script = "", legacyInterceptor = true) {
+  denied = false
+  destinationRequests.length = 0
+  html = `<!doctype html><style>body{margin:0}a,button{display:block;width:400px;height:60px;line-height:60px}</style>
+    ${markup}<script>
+    ${
+      legacyInterceptor
+        ? `document.addEventListener('click', event => {
+      const link = event.target.closest('a[href]');
+      if (link && !link.getAttribute('href').startsWith('#')) {
+        event.preventDefault();
+        parent.postMessage('legacy-document-interceptor', '*');
+      }
+    }, true);`
+        : ""
+    }
+    ${script}
+    requestAnimationFrame(()=>requestAnimationFrame(()=>parent.postMessage('link-fixture-ready', '*')));<\/script>`
+  await call("Page.navigate", { url: "about:blank" })
+  await until('location.href === "about:blank"')
+  await call("Page.bringToFront")
+  await call("Page.navigate", {
+    url: `${contentOrigin}/view/${id}#test-capability`,
+  })
+  await until('window.testMessages.includes("link-fixture-ready")')
+  assert.equal(
+    await evaluate('document.querySelector("iframe").getAttribute("sandbox")'),
+    "allow-scripts"
+  )
+}
+
+async function clickLink(y = 30, button = "left", x = 40) {
+  await settleInput()
+  for (const type of ["mousePressed", "mouseReleased"])
+    await call("Input.dispatchMouseEvent", {
+      type,
+      x,
+      y,
+      button,
+      buttons: type === "mousePressed" ? (button === "middle" ? 4 : 1) : 0,
+      clickCount: 1,
+    })
+}
+
+async function settleInput() {
+  await call("Page.bringToFront")
+  await evaluate(
+    "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))"
+  )
+}
+
+async function destinationTargets() {
+  return (await call("Target.getTargets")).targetInfos.filter(
+    (target) =>
+      target.type === "page" && target.url.startsWith(destinationOrigin)
+  )
+}
+
+async function pageTargetIds() {
+  return (await call("Target.getTargets")).targetInfos
+    .filter((target) => target.type === "page")
+    .map((target) => target.targetId)
+    .sort()
+}
+
+async function assertNoNewPageTargets(before) {
+  // CDP may finish closing a previous popup after its close command resolves.
+  // Disappearing targets are harmless; every newly created page must still fail.
+  const existing = new Set(before)
+  assert.deepEqual(
+    (await pageTargetIds()).filter((targetId) => !existing.has(targetId)),
+    [],
+    "The action must not create a new page target"
+  )
+}
+
+async function assertOpenedDestination(url) {
+  const deadline = Date.now() + 5000
+  let target
+  while (Date.now() < deadline) {
+    target = (await destinationTargets()).find(
+      (candidate) => candidate.url === url
+    )
+    if (
+      target &&
+      destinationRequests.some(
+        (request) => request.url === new URL(url).pathname
+      )
+    )
+      break
+    await delay(40)
+  }
+  assert.ok(
+    target,
+    "A trusted link click must open its local destination in a new tab: " +
+      JSON.stringify(
+        await evaluate(
+          '({messages:window.testMessages,active:navigator.userActivation?.isActive,fallback:document.querySelector("#render-link-fallback")?.hidden})'
+        )
+      ) +
+      `; requests=${JSON.stringify(destinationRequests)}; errors=${browserErrors.slice(-3).join("; ")}`
+  )
+  try {
+    const { sessionId } = await call("Target.attachToTarget", {
+      targetId: target.targetId,
+      flatten: true,
+    })
+    const { result } = await call(
+      "Runtime.evaluate",
+      {
+        expression:
+          "({openerIsNull:window.opener===null, referrer:document.referrer})",
+        returnByValue: true,
+      },
+      sessionId
+    )
+    assert.deepEqual(result.value, { openerIsNull: true, referrer: "" })
+    const request = destinationRequests.find(
+      (entry) => entry.url === new URL(url).pathname
+    )
+    assert.ok(request)
+    assert.equal(request.headers.authorization, undefined)
+    assert.equal(request.headers.referer, undefined)
+    assert.equal(request.headers.cookie, undefined)
+    assert.equal(await evaluate("location.href"), `${contentOrigin}/view/${id}`)
+    assert.equal(
+      await evaluate(
+        'window.testMessages.includes("legacy-document-interceptor")'
+      ),
+      false
+    )
+    assert.deepEqual(
+      await evaluate(`(() => {
+      const link=document.querySelector('#render-link-open');
+      return {hidden:document.querySelector('#render-link-fallback').hidden,
+        href:link.href,target:link.target,rel:link.rel};
+    })()`),
+      { hidden: false, href: url, target: "_blank", rel: "noopener noreferrer" }
+    )
+  } finally {
+    await call("Target.closeTarget", { targetId: target.targetId })
+  }
+}
+
+for (const gesture of ["left", "middle", "keyboard"]) {
+  test(`sandbox links open a trusted ${gesture} click before legacy report interceptors`, async () => {
+    const url = `${destinationOrigin}/trusted-${gesture}`
+    await loadLinkFixture(
+      `<a id="outbound" href="${url}" target="_self" onfocus="parent.postMessage('link-focused','*')"><span>Open local destination</span></a>`
+    )
+    if (gesture === "keyboard") {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (await evaluate('window.testMessages.includes("link-focused")'))
+          break
+        await call("Input.dispatchKeyEvent", {
+          type: "keyDown",
+          key: "Tab",
+          code: "Tab",
+          windowsVirtualKeyCode: 9,
+        })
+        await call("Input.dispatchKeyEvent", {
+          type: "keyUp",
+          key: "Tab",
+          code: "Tab",
+          windowsVirtualKeyCode: 9,
+        })
+      }
+      await until('window.testMessages.includes("link-focused")')
+      await settleInput()
+      await call("Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+      })
+      await call("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+      })
+    } else {
+      await clickLink(30, gesture)
+    }
+    await assertOpenedDestination(url)
+  })
+}
+
+test("sandbox links reject synthetic clicks and messages without activation", async () => {
+  const url = `${destinationOrigin}/synthetic`
+  const targets = await pageTargetIds()
+  await loadLinkFixture(
+    `<a id="outbound" href="${url}">Synthetic target</a>`,
+    `
+    document.getElementById('outbound').click();
+    parent.postMessage({type:'aresclaw-dashboard-open-link',url:${JSON.stringify(url)}}, '*');
+  `
+  )
+  await delay(300)
+  await assertNoNewPageTargets(targets)
+  assert.equal(destinationRequests.length, 0)
+  assert.equal(await evaluate("location.href"), `${contentOrigin}/view/${id}`)
+  assert.equal(
+    await evaluate(
+      'Boolean(document.querySelector("#render-link-open")?.getClientRects().length)'
+    ),
+    false
+  )
+})
+
+test("sandbox links reject forged messages and channel replacement during a real unrelated gesture", async () => {
+  const url = `${destinationOrigin}/after-forgery`
+  await loadLinkFixture(
+    `<button id="forge">Unrelated report action</button><a id="outbound" target="_blank" href="${url}">Actual link</a>`,
+    `document.getElementById('forge').addEventListener('click', () => {
+      parent.postMessage({type:'aresclaw-dashboard-open-link',url:${JSON.stringify(url)}}, '*');
+      const fake = new MessageChannel();
+      parent.postMessage({type:'aresclaw-dashboard-link-ready'}, '*', [fake.port2]);
+      fake.port1.postMessage({url:${JSON.stringify(url)}});
+      document.getElementById('outbound').click();
+      parent.postMessage('forgery-attempted', '*');
+    });`,
+    false
+  )
+  await settleInput()
+  const targets = await pageTargetIds()
+  await clickLink(30)
+  await until('window.testMessages.includes("forgery-attempted")')
+  await delay(300)
+  await assertNoNewPageTargets(targets)
+  assert.equal(destinationRequests.length, 0)
+  assert.equal(
+    await evaluate(
+      'Boolean(document.querySelector("#render-link-open")?.getClientRects().length)'
+    ),
+    false
+  )
+  // The forged replacement channel must not break the legitimate private one.
+  await clickLink(90)
+  await assertOpenedDestination(url)
+})
+
+test("sandbox links reject javascript data and credential-bearing destinations", async () => {
+  const unsafe = [
+    "javascript:parent.postMessage('unsafe-script-ran','*')",
+    "data:text/html,<script>opener.postMessage('unsafe-script-ran','*')</script>",
+    `${destinationOrigin.replace("//", "//user:secret@")}\/userinfo`,
+  ]
+  for (const url of unsafe) {
+    const escaped = url
+      .replaceAll("&", "&amp;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("<", "&lt;")
+    await loadLinkFixture(
+      `<a href="${escaped}">Unsafe destination</a>`,
+      "document.addEventListener('click',()=>parent.postMessage('unsupported-document-click','*'),true);",
+      false
+    )
+    await settleInput()
+    const targets = await pageTargetIds()
+    await clickLink()
+    await delay(200)
+    await assertNoNewPageTargets(targets)
+    assert.equal(destinationRequests.length, 0)
+    assert.equal(
+      await evaluate('window.testMessages.includes("unsafe-script-ran")'),
+      false
+    )
+    assert.equal(
+      await evaluate(
+        'window.testMessages.includes("unsupported-document-click")'
+      ),
+      false
+    )
+    assert.equal(await evaluate("location.href"), `${contentOrigin}/view/${id}`)
+    assert.equal(
+      await evaluate(
+        'Boolean(document.querySelector("#render-link-open")?.getClientRects().length)'
+      ),
+      false
+    )
+  }
+})
+
+for (const activation of ["unavailable", "inactive"]) {
+  test(`sandbox links provide a manual trusted fallback when activation detection is ${activation}`, async () => {
+    const url = `${destinationOrigin}/manual-fallback`
+    await loadLinkFixture(`<a href="${url}">Local destination</a>`)
+    await evaluate(
+      `Object.defineProperty(navigator,'userActivation',{value:${activation === "unavailable" ? "undefined" : "{isActive:false}"},configurable:true})`
+    )
+    await settleInput()
+    const targets = await pageTargetIds()
+    await clickLink()
+    await until(
+      'document.querySelector("#render-link-fallback")?.hidden === false'
+    )
+    await assertNoNewPageTargets(targets)
+    assert.equal(destinationRequests.length, 0)
+    const point = await evaluate(`(() => {
+    const r=document.querySelector('#render-link-open').getBoundingClientRect();
+    return {x:r.x+r.width/2,y:r.y+r.height/2};
+  })()`)
+    await clickLink(point.y, "left", point.x)
+    await assertOpenedDestination(url)
+  })
+}
+
+test("sandbox links preserve fragment anchor navigation in the report", async () => {
+  await loadLinkFixture(
+    '<a id="tab" href="#tab-control">Report tab control</a><a href="#section-two">Jump to report section</a><div style="height:1500px"></div><h2 id="section-two">Section two</h2>',
+    `addEventListener('hashchange',()=>parent.postMessage({type:'fragment-state',hash:location.hash,scrolled:scrollY>0},'*'));
+    document.getElementById('tab').addEventListener('click',event=>{
+      event.preventDefault();
+      parent.postMessage({type:'tab-control',hash:location.hash,scrolled:scrollY>0},'*');
+    });`
+  )
+  await clickLink()
+  await until(
+    'window.testMessages.some(message=>message?.type==="tab-control" && message.hash==="" && !message.scrolled)'
+  )
+  await clickLink(90)
+  await until(
+    'window.testMessages.some(message=>message?.type==="fragment-state" && message.hash==="#section-two" && message.scrolled)'
+  )
+  assert.deepEqual(await destinationTargets(), [])
+  assert.equal(destinationRequests.length, 0)
+  assert.equal(await evaluate("location.href"), `${contentOrigin}/view/${id}`)
 })
 
 test("launcher forwards the same tab to the content loader: single layer, no control iframe", async () => {
@@ -455,6 +802,8 @@ test("sandbox renders interactive HTML but blocks parent access, external calls,
     try { top.location.href = '${origin}/attack' } catch {}
     fetch('${origin}/api/v1/attack').catch(() => {});<\/script>`
   recorded = []
+  await call("Page.navigate", { url: "about:blank" })
+  await until('location.href === "about:blank"')
   await call("Page.navigate", {
     url: `${contentOrigin}/view/${id}#test-capability`,
   })

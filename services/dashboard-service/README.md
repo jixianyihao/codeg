@@ -1,6 +1,6 @@
 # AresClaw Dashboard Service
 
-设计、接口契约与当前验证记录统一维护在[看板文档入口](C:/Users/ouyan/Documents/code/acpdev/codeg/docs/aresclaw-dashboard/README.md)。
+设计、接口契约与当前验证记录统一维护在[看板文档入口](../../docs/aresclaw-dashboard/README.md)。
 
 独立部署的公共看板服务：Python 3.11+ / FastAPI / SQLAlchemy / PyMySQL /
 MySQL 8 / PyJWT / Alembic / Boto3(S3)。已发布 HTML 存私有 S3，MySQL 保存

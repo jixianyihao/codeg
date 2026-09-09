@@ -10,8 +10,12 @@ export interface Dashboard {
   owner_type: "human" | "service"
   current_version_id: string | null
   current_version_number: number | null
+  current_version_sha256?: string | null
+  current_version_byte_size?: number | null
   draft_version_id?: string | null
   draft_version_number?: number | null
+  draft_version_sha256?: string | null
+  draft_version_byte_size?: number | null
   has_draft?: boolean
   revision: number
   status: DashboardStatus

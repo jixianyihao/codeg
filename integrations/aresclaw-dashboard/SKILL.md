@@ -17,9 +17,57 @@ file, at most 10 MiB, with required CSS, JavaScript, data, fonts, and images
 inline. It cannot rely on a CDN, other files, a build step, external APIs, or a
 backend.
 
+For article, reference or related-dashboard links, emit ordinary anchors with
+absolute HTTP(S) `href` URLs. The public viewer opens genuine link clicks in a
+new tab while retaining its sandbox; `href="#section"` remains in-page navigation.
+Use `target="_blank" rel="noopener noreferrer"` for standalone HTML too. Do not
+disable anchors merely because `window.self !== window.top`, replace them with
+copy-only panels, implement custom `window.open`/parent navigation, or request
+extra sandbox permissions. Rows may contain normal anchors; `data-url` alone is
+not a link. The viewer's private link channel is internal and must not be
+reimplemented by generated HTML. Keep existing links and their intended targets
+when revising content.
+
 An update belongs to the same dashboard ID and stable link, regardless of
 frequency. Read `show` to identify the target and revision; resolve ambiguity
 before writing. Never create a new dashboard merely because its HTML changed.
+
+To compare an existing dashboard before updating:
+
+1. Use `list` or `show` to select the dashboard ID, revision, and the intended
+   current/draft version ID, SHA-256 and byte size. These calls return metadata,
+   not HTML; missing versions and inaccessible drafts have null metadata.
+2. Hash local HTML as raw bytes (including its final newline). If source is
+   needed for a diff, use the version ID and digest from that same snapshot:
+   `dashboard source <dashboard-id> --version-id <version-id> --expected-sha256 <sha256> --output downloads/baseline.html`.
+   This fetches the exact immutable version without rereading the moving pointer.
+3. Review the diff, then use `save` or `publish --file` with the same dashboard ID,
+   the captured revision and a new request UUID. Preserve the stable link. On a
+   conflict, reread and make a new deliberate decision; never automatically
+   substitute a newer revision.
+
+For a fresh source selection, `source <dashboard-id> --output <relative-path>`
+defaults to `--version current`; `--version draft` selects the candidate.
+`--version` and `--version-id` are mutually exclusive. A selector reads detail
+once, pins its version ID, digest, size and revision, then downloads that version.
+A missing or hidden pointer fails without a source request; never fall back from
+draft to current. Successful JSON reports `state`, `dashboard_id`, `version_id`,
+the actual `sha256`, `byte_size` and `output`; selector downloads also report the
+original detail revision. Explicit-ID downloads do not supply a current revision.
+
+`--expected-sha256` accepts exactly 64 lowercase hexadecimal characters; uppercase
+or whitespace is rejected before network access. Source digest, version response
+headers and selected metadata are checked before any output file is created.
+An integrity mismatch exits 9 and leaves no output. Older services without the
+headers still support explicit-ID downloads and the supplied expected digest.
+Choose a new relative output path: the CLI never overwrites files or follows
+symbolic links/junctions. It preserves source bytes exactly, with no newline,
+whitespace or encoding normalization; do not use S3 ETag as the content hash.
+
+Equal hashes permit the caller to skip a content-only no-op when no state,
+metadata or permission change is requested. They do not mean a draft is published
+or replace publish, restore, archive or access actions. The CLI does not skip
+uploads or rebase revisions automatically.
 
 | User intent | Command |
 | --- | --- |

@@ -67,6 +67,74 @@ preserve them, or supply an empty description explicitly to clear it. New
 dashboard creation with a file requires a title. `list --status draft` lists
 drafts the current caller can access.
 
+## Read, compare, and update source
+
+`list` and `show` return metadata only: the dashboard ID and revision, plus
+separate `current_version_id` / `draft_version_id`, `*_version_sha256`, and
+`*_version_byte_size` fields. Listing does not fetch HTML or read each source
+object. Missing versions have null metadata; an inaccessible draft stays hidden.
+
+```sh
+dashboard list --scope mine
+dashboard show <dashboard-id>
+dashboard source <dashboard-id> --output downloads/current.html
+dashboard source <dashboard-id> --version draft --output downloads/draft.html
+dashboard source <dashboard-id> --version-id <version-id-from-list> --expected-sha256 <sha256-from-list> --output downloads/baseline.html
+```
+
+`source --version current` is the default when `--version-id` is absent.
+`--version current|draft` and `--version-id` are mutually exclusive. A selector
+reads `show` once, pins its version ID, SHA-256, byte size and revision, then
+downloads that exact version even if another user publishes meanwhile. A missing
+or hidden selected pointer exits 4 without requesting source; draft selection
+never falls back to the live version. For a snapshot already selected from
+`list`, use its explicit version ID and digest as in the last command: this avoids
+a second metadata read and preserves the original comparison target.
+
+`--expected-sha256` must be exactly 64 lowercase hexadecimal characters; uppercase,
+whitespace and malformed values are rejected before credential loading or any
+network request. The CLI hashes the downloaded bytes and compares every available
+expectation: the supplied digest, selected detail digest and size, and the
+`X-Content-SHA256` / `X-Dashboard-Version-Id` response headers. Header names are
+case-insensitive; equivalent UUID version spellings match the same version,
+while legacy opaque IDs require an exact match. A mismatch exits 9 with `source_integrity_mismatch` and creates
+neither the file nor its parent directory. Older services without these headers
+remain usable with an explicit version ID; `--expected-sha256` can still check a
+digest from an external snapshot. Output must be relative to the configured
+workdir, and existing files, symbolic links, junctions and escaping paths remain
+rejected.
+
+Successful source JSON includes `state`, `dashboard_id`, `version_id`, `sha256`
+(computed from actual bytes), `byte_size` and `output`. Current/draft selection
+also returns the original detail `revision`; explicit-ID downloads do not invent
+a revision. Source is written byte for byte, including encoding, whitespace,
+CRLF/LF and the final newline. Hash local HTML in binary mode too, for example:
+
+```sh
+python3 -c 'import hashlib,pathlib; print(hashlib.sha256(pathlib.Path("report.html").read_bytes()).hexdigest())'
+```
+
+Compare local HTML with the selected source, review the diff, then `save` or
+`publish --file` with the same dashboard ID, the revision captured by `list`/`show`
+and a new request UUID. Equal hashes allow the caller to skip only an action that
+would change content alone; they do not replace publishing a saved draft,
+restoring or archiving, or changing metadata or permissions. Neither CLI nor
+service automatically skips an upload or a business action based on a hash.
+A revision conflict requires a new review of the changes; do not silently rebase
+onto the latest revision. Updates create immutable versions at the same stable
+dashboard link.
+
+## Write results and recovery
+
+Published HTML can contain ordinary absolute HTTP(S) links to articles or other
+dashboards. The viewer opens real anchor clicks in a new tab with no opener or
+referrer, retaining the current board; `#section` anchors stay inside the HTML.
+Use real `a[href]` elements rather than `data-url` rows or custom window/parent
+navigation. Do not add a framed-mode `preventDefault()` handler or a copy-only
+notice: the viewer owns external link handling. If the browser blocks opening,
+its trusted fallback link lets the user open the validated destination. This
+render-time behavior does not rewrite stored HTML, its source or SHA-256.
+
 ```sh
 request_id="$(dashboard new-request-id | python3 -c 'import json,sys; print(json.load(sys.stdin)["request_id"])')"
 dashboard publish --file report.html --title "Weekly report" --request-id "$request_id"
@@ -96,7 +164,7 @@ of failing on the revision the first success bumped.
 
 Business results and errors are one JSON object on stdout. Diagnostics use
 stderr and never contain the loaded credential. Exit codes follow
-[the canonical contracts, section 8](C:/Users/ouyan/Documents/code/acpdev/codeg/docs/aresclaw-dashboard/contracts.md):
+[the canonical contracts, section 8](../../docs/aresclaw-dashboard/contracts.md):
 
 | Code | Meaning |
 | ---: | --- |
@@ -141,7 +209,7 @@ attempt, keyed by request ID and bound to the verified principal:
 ## Tests
 
 ```sh
-python3 -m unittest discover -s integrations/aresclaw-dashboard/tests -v
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s integrations/aresclaw-dashboard/tests -v
 ```
 
 Tests use a real temporary HTTP server and subprocess CLI invocations. No

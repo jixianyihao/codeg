@@ -68,6 +68,17 @@ def dashboard_view(connection, service: Service, row, access) -> dict:
     owner = connection.execute(
         select(models.principals.c.display_name, models.principals.c.type)
         .where(models.principals.c.id == row["owner_principal_id"])).mappings().one()
+    current_id = row["current_version_id"] if access.rank >= 1 else None
+    draft_id = row["draft_version_id"] if access.rank >= 2 else None
+    ids = [version_id for version_id in (current_id, draft_id) if version_id is not None]
+    # Content summaries are resource-read metadata, not persisted operation
+    # results. Resolve immutable versions from this row's pointers without S3.
+    versions = {version["id"]: version for version in connection.execute(
+        select(models.dashboard_versions.c.id, models.dashboard_versions.c.sha256,
+               models.dashboard_versions.c.byte_size).where(
+            models.dashboard_versions.c.dashboard_id == row["id"],
+            models.dashboard_versions.c.id.in_(ids))).mappings()} if ids else {}
+    current, draft = versions.get(current_id, {}), versions.get(draft_id, {})
     return {
         "id": row["id"],
         "title": row["title"],
@@ -76,6 +87,10 @@ def dashboard_view(connection, service: Service, row, access) -> dict:
         "owner_name": owner["display_name"],
         "owner_type": owner["type"],
         **version_state(connection, row, include_draft=access.rank >= 2),
+        "current_version_sha256": current.get("sha256"),
+        "current_version_byte_size": current.get("byte_size"),
+        "draft_version_sha256": draft.get("sha256"),
+        "draft_version_byte_size": draft.get("byte_size"),
         "revision": row["revision"],
         "status": row["status"],
         "role": access.role,

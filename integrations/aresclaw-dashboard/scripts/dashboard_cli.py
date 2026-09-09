@@ -95,6 +95,15 @@ def validate_uuid(value: str, label: str) -> str:
     return str(parsed)
 
 
+def same_version_id(left: str, right: str) -> bool:
+    # The service canonicalizes UUID spellings before lookup. Legacy opaque
+    # identifiers still require an exact match; never fold their casing.
+    try:
+        return uuid.UUID(left) == uuid.UUID(right)
+    except (ValueError, AttributeError):
+        return left == right
+
+
 def normalized_date(value: str | None, label: str) -> str | None:
     if value is None:
         return None
@@ -564,7 +573,62 @@ class DirectTransport:
 
     # -------------------------------------------------- REST command mapping
 
+    def download_source(self, params: dict):
+        dashboard_id = params["dashboard_id"]
+        version_id = params.get("version_id")
+        revision = None
+        selected_sha256 = None
+        selected_byte_size = None
+        if version_id is None:
+            selection = params.get("version", "current")
+            detail, status = self.invoke("dashboard.show", {"dashboard_id": dashboard_id}, None)
+            if status != 200 or not isinstance(detail, dict):
+                raise CliError("invalid_response", "dashboard detail response is invalid", EXIT_REMOTE)
+            version_id = detail.get(f"{selection}_version_id")
+            if version_id is None or version_id == "":
+                raise CliError("not_found", f"the {selection} version is unavailable or not visible", EXIT_FORBIDDEN)
+            revision = detail.get("revision")
+            if not isinstance(version_id, str) or type(revision) is not int or revision < 1:
+                raise CliError("invalid_response", "dashboard version metadata is invalid", EXIT_REMOTE)
+            selected_sha256 = detail.get(f"{selection}_version_sha256")
+            selected_byte_size = detail.get(f"{selection}_version_byte_size")
+
+        # Resolve pointers once. Publishing during this GET must not switch the
+        # source, digest, byte count or revision to a different snapshot.
+        quote = lambda value: urllib.parse.quote(str(value), safe="")
+        path = f"/api/v1/dashboards/{quote(dashboard_id)}/versions/{quote(version_id)}/source"
+        status, headers, response = self.client.request("GET", path)
+        if status != 200:
+            raise CliError("invalid_response", "source download did not return HTTP 200", EXIT_REMOTE)
+        if len(response) > MAX_UPLOAD_BYTES:
+            raise CliError("file_too_large", "download exceeds the supported size", EXIT_REMOTE)
+        digest = hashlib.sha256(response).hexdigest()
+        headers = {name.lower(): value for name, value in headers.items()}
+        expected_digests = [params.get("expected_sha256"), selected_sha256,
+                            headers.get("x-content-sha256")]
+        mismatch = any(expected is not None and expected != digest for expected in expected_digests)
+        if "x-dashboard-version-id" in headers and not same_version_id(headers["x-dashboard-version-id"], version_id):
+            mismatch = True
+        if selected_byte_size is not None and (type(selected_byte_size) is not int or selected_byte_size != len(response)):
+            mismatch = True
+        if mismatch:
+            raise CliError("source_integrity_mismatch", "source bytes or version do not match the expected snapshot; no output was created", EXIT_REMOTE)
+
+        # Check integrity before creating even the destination's parent, and
+        # retain exclusive creation plus the existing link/escape protection.
+        output = safe_output(self.workdir, params["output"])
+        with output.open("xb") as handle:
+            handle.write(response)
+        result = {"state": "succeeded", "dashboard_id": dashboard_id, "version_id": version_id,
+                  "sha256": digest, "byte_size": len(response),
+                  "output": relative_path(params["output"], "output")}
+        if revision is not None:
+            result["revision"] = revision
+        return result
+
     def invoke(self, action: str, params: dict, request_id: str | None):
+        if action == "dashboard.source":
+            return self.download_source(params)
         quote = lambda value: urllib.parse.quote(str(value), safe="")
         query = lambda values: urllib.parse.urlencode([(k, v) for k, v in values.items() if v is not None])
         headers = {}
@@ -577,8 +641,6 @@ class DirectTransport:
             path = "/api/v1/dashboards?" + query({"scope": params.get("scope"), "q": params.get("query"), "cursor": params.get("cursor"), "status": params.get("status")})
         elif action == "dashboard.show":
             path = f"/api/v1/dashboards/{quote(params['dashboard_id'])}"
-        elif action == "dashboard.source":
-            path = f"/api/v1/dashboards/{quote(params['dashboard_id'])}/versions/{quote(params['version_id'])}/source"
         elif action == "dashboard.publish":
             method = "POST"
             html = params["html_bytes"]
@@ -648,14 +710,7 @@ class DirectTransport:
             raise CliError("unsupported_action", "unsupported dashboard action")
         if body is not None and "Content-Type" not in headers:
             headers["Content-Type"] = "application/json"
-        status, response_headers, response = self.client.request(method, path, body=body, headers=headers)
-        if action == "dashboard.source":
-            if len(response) > MAX_UPLOAD_BYTES:
-                raise CliError("file_too_large", "download exceeds the supported size", EXIT_REMOTE)
-            output = safe_output(self.workdir, params["output"])
-            with output.open("xb") as handle:
-                handle.write(response)
-            return {"state": "succeeded", "output": relative_path(params["output"], "output"), "byte_size": len(response)}
+        status, _response_headers, response = self.client.request(method, path, body=body, headers=headers)
         return parse_json_bytes(response), status
 
 
@@ -775,7 +830,10 @@ def build_parser() -> JsonParser:
     item.add_argument("dashboard_id")
     item = commands.add_parser("source")
     item.add_argument("dashboard_id")
-    item.add_argument("--version-id", required=True)
+    choice = item.add_mutually_exclusive_group()
+    choice.add_argument("--version", choices=["current", "draft"], help="Resolve once from dashboard detail (default: current)")
+    choice.add_argument("--version-id", help="Download this exact immutable version without resolving a pointer")
+    item.add_argument("--expected-sha256", help="Require this exact 64-character lowercase SHA-256")
     item.add_argument("--output", required=True)
     item = commands.add_parser("create", help="Create an empty private draft")
     item.add_argument("--title", required=True)
@@ -873,6 +931,13 @@ def validate_command_arguments(args):
     revision = getattr(args, "expected_revision", None)
     if revision is not None and revision < 1:
         raise CliError("invalid_revision", "expected-revision must be a positive integer")
+    if args.command == "source":
+        digest = args.expected_sha256
+        if digest is not None and (len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
+            raise CliError("invalid_sha256", "expected-sha256 must contain exactly 64 lowercase hexadecimal characters")
+        if args.version_id is not None and not args.version_id:
+            raise CliError("invalid_source", "version-id must not be empty")
+        relative_path(args.output, "output")
     if args.command not in {"save", "publish"}:
         return
     if bool(args.dashboard_id) != (revision is not None):
@@ -896,8 +961,9 @@ def command_action(args, transport):
     if command == "show":
         return "dashboard.show", {"dashboard_id": args.dashboard_id}
     if command == "source":
-        relative_path(args.output, "output")
-        return "dashboard.source", {"dashboard_id": args.dashboard_id, "version_id": args.version_id, "output": args.output}
+        return "dashboard.source", {"dashboard_id": args.dashboard_id, "version_id": args.version_id,
+                                    "version": args.version or "current", "expected_sha256": args.expected_sha256,
+                                    "output": args.output}
     if command == "create":
         return "dashboard.create", {"title": args.title, "description": args.description}
     if command in {"save", "publish"}:

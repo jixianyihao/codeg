@@ -312,6 +312,8 @@ async def get_source(dashboard_id: str, version_id: str, request: Request,
                 headers={
                     "Content-Disposition": f'attachment; filename="{version_id}.txt"',
                     "X-Content-Type-Options": "nosniff",
+                    "X-Content-SHA256": version["sha256"],
+                    "X-Dashboard-Version-Id": version["id"],
                 })
 
     return await run_in_threadpool(run)
