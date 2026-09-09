@@ -66,10 +66,11 @@ class W3IdentityVerifier(Protocol):
 
 
 class UnconfiguredW3Verifier:
-    def __init__(self):
-        raise_for_setup()
+    """No W3 configuration: the service still starts (machine-to-machine
+    flows must not depend on W3 availability); every human verification
+    fails closed with an explicit configuration error."""
 
-    def verify(self, token: str) -> W3Identity:  # pragma: no cover - unreachable
+    def verify(self, token: str) -> W3Identity:
         raise_for_setup()
 
 

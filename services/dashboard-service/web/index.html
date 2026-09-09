@@ -43,6 +43,7 @@
               <span id="owner"></span><span id="role" class="badge"></span>
               <span id="published-at"></span><span id="access-expiry"></span>
             </div>
+            <ul id="access-sources" class="access-sources" hidden></ul>
           </div>
           <div class="actions">
             <button id="copy-link" type="button">复制链接</button>
@@ -199,6 +200,7 @@
           ></textarea>
         </label>
         <p class="help">修改信息不会更新已发布的 HTML 内容。</p>
+        <p role="alert" class="dialog-error" hidden></p>
         <div class="actions">
           <button type="button" data-close="metadata-dialog">取消</button
           ><button class="primary" type="submit">保存</button>

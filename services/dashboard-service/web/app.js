@@ -364,6 +364,34 @@
     if (!$("grants").children.length)
       $("grants").append(element("p", "暂无用户、服务账号或群组授权。", "help"))
   }
+  async function showAccessSources() {
+    // Current-permission diagnosis: only sources visible to the caller are
+    // shown, and history sharing the same ACL is stated explicitly.
+    const access = await api(`${base}/access`)
+    const holder = $("access-sources")
+    if (!holder) return
+    holder.replaceChildren()
+    if (!access.sources?.length) {
+      holder.hidden = true
+      return
+    }
+    holder.hidden = false
+    for (const source of access.sources) {
+      const label =
+        source.subject_type === "owner"
+          ? "看板所有者"
+          : `${types[source.subject_type] || source.subject_type} · ${source.role}` +
+            (source.expires_at ? ` · 至 ${formatDate(source.expires_at)}` : " · 长期")
+      holder.append(element("li", label))
+    }
+    const note = element(
+      "li",
+      "历史版本与当前版本共用以上权限；撤销其中一条不一定完全失去访问。",
+    )
+    note.className = "help"
+    holder.append(note)
+  }
+
   async function reload() {
     const current = ++generation
     ++viewGeneration
@@ -394,6 +422,7 @@
       if (current !== generation) return
       dashboard = nextDashboard
       showDashboard()
+      showAccessSources().catch(() => {})
       const results = await Promise.allSettled([
         loadVersions(),
         loadGrants(),
@@ -410,16 +439,28 @@
       notice(errorMessage(error), true)
     }
   }
-  async function mutate(path, method, payload, success, retry = false) {
+  async function mutate(path, method, payload, success, retry = false, dialogId = null) {
     if (writing) return
     if (pendingWrite && !retry) {
       notice(
         "上一次写操作的结果尚未确定。请先重试原操作，避免重复或覆盖修改。",
-        true
+        true,
       )
       $("recovery").hidden = false
       $("retry-write").hidden = false
       return
+    }
+    const dialogError = (message) => {
+      if (!dialogId) return
+      const node = document.querySelector(`#${dialogId} [role="alert"]`)
+      if (!node) return
+      node.textContent = message
+      node.hidden = false
+    }
+    const dialogErrorClear = () => {
+      if (!dialogId) return
+      const node = document.querySelector(`#${dialogId} [role="alert"]`)
+      if (node) node.hidden = true
     }
     const request = retry
       ? pendingWrite
@@ -444,6 +485,7 @@
     document.querySelectorAll("button").forEach((node) => {
       node.disabled = true
     })
+    dialogErrorClear()
     try {
       await api(request.path, {
         method: request.method,
@@ -453,6 +495,7 @@
       pendingWrite = null
       $("retry-write").hidden = true
       $("recovery").hidden = true
+      dialogErrorClear()
       document
         .querySelectorAll("dialog[open]")
         .forEach((dialog) => dialog.close())
@@ -463,6 +506,9 @@
       pendingWrite = uncertain ? request : null
       $("recovery").hidden = false
       $("retry-write").hidden = !pendingWrite
+      // In-dialog failures keep the dialog (and the user's draft) open with
+      // the reason next to the fields; deterministic 4xx conflicts do not.
+      dialogError(errorMessage(error))
       notice(errorMessage(error), true)
     } finally {
       writing = false
@@ -555,7 +601,9 @@
       base,
       "PATCH",
       { title, description: $("metadata-description").value.trim() },
-      "看板信息已更新，内容版本保持不变。"
+      "看板信息已更新，内容版本保持不变。",
+      false,
+      "metadata-dialog",
     )
   })
   $("archive").addEventListener("click", () => {

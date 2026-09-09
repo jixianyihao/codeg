@@ -477,3 +477,18 @@ dialog .actions {
     justify-content: flex-end;
   }
 }
+
+.access-sources {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #526073;
+  font-size: 13px;
+}
+.access-sources .help {
+  list-style: none;
+  color: #7b8794;
+}
+
+.dialog-error {
+  color: #a52b36;
+}

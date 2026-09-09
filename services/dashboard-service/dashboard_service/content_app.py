@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from .config import Config
-from .errors import ApiError
+from .errors import ApiError, new_id, require
 from .routers import Service
 
 BOOTSTRAP_CSP = (
@@ -52,7 +52,7 @@ def create_content_app(service: Service) -> FastAPI:
                                      "X-Content-Type-Options": "nosniff"})
 
     @app.get("/content")
-    def content(request: Request):
+    async def content(request: Request):
         header = request.headers.get("authorization") or ""
         token = header[7:].strip() if header.startswith("Bearer ") else ""
         require(bool(token), 401, "invalid_capability", "A view capability is required")
@@ -73,7 +73,7 @@ def create_content_app(service: Service) -> FastAPI:
                     "Content-Disposition": "inline",
                 })
 
-        return run_in_threadpool(run)
+        return await run_in_threadpool(run)
 
     @app.get("/health/live")
     def live():

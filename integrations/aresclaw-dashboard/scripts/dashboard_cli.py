@@ -19,15 +19,16 @@ import urllib.request
 import uuid
 
 
+# contracts.md section 7 exit codes.
 EXIT_SUCCESS = 0
-EXIT_PENDING = 10
-EXIT_AUTH = 20
-EXIT_FORBIDDEN = 21
-EXIT_CONFLICT = 30
-EXIT_INPUT = 40
-EXIT_UNKNOWN = 50
-EXIT_NETWORK = 60
-EXIT_REMOTE = 70
+EXIT_INPUT = 2
+EXIT_AUTH = 3
+EXIT_FORBIDDEN = 4
+EXIT_CONFLICT = 5
+EXIT_PENDING = 6
+EXIT_UNKNOWN = 7
+EXIT_NETWORK = 8
+EXIT_REMOTE = 9
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 WRITE_ACTIONS = {
     "dashboard.publish",
@@ -200,17 +201,21 @@ def validated_bridge_url(value: str) -> str:
 
 
 class HttpClient:
-    def __init__(self, base_url: str, timeout: float, token: str | None = None, session: str | None = None):
+    def __init__(self, base_url: str, timeout: float, token: str | None = None,
+                 session: str | None = None, auth_mode: str | None = None):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.token = token
         self.session = session
+        self.auth_mode = auth_mode
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
     def request(self, method: str, path: str, *, body: bytes | None = None, headers=None):
         request_headers = {"Accept": "application/json"}
         if self.token is not None:
             request_headers["Authorization"] = f"Bearer {self.token}"
+        if self.auth_mode is not None:
+            request_headers["X-Dashboard-Auth-Mode"] = self.auth_mode
         if self.session is not None:
             request_headers["X-AresClaw-Dashboard-Session"] = self.session
         if headers:
@@ -285,7 +290,10 @@ class IntegrationTransport:
         if not 0 < timeout <= 300:
             raise CliError("invalid_config", "timeout_seconds must be between 0 and 300")
         self.secrets = [token]
-        self.client = HttpClient(validated_origin(str(config["service_url"])), timeout, token=token)
+        # Integration mode always selects the service verifier; the human
+        # branch is never attempted (contracts.md section 1).
+        self.client = HttpClient(validated_origin(str(config["service_url"])), timeout,
+                                 token=token, auth_mode="service")
 
     @staticmethod
     def _config_path(base: Path, value: object, label: str) -> Path:
@@ -462,7 +470,9 @@ class IntegrationTransport:
             path = "/api/v1/groups?" + query({"q": params.get("query"), "cursor": params.get("cursor")})
         elif action == "group.create":
             method, path = "POST", "/api/v1/groups"
-            body = json_bytes({k: v for k, v in params.items() if k in {"name", "description"}})
+            body = json_bytes({"display_name": params["display_name"]})
+        elif action == "group.show":
+            path = f"/api/v1/groups/{quote(params['group_id'])}"
         elif action == "group.set_members":
             method, path = "PUT", f"/api/v1/groups/{quote(params['group_id'])}/members"
             body = json_bytes({"members": params["members"], "expected_revision": params["expected_revision"]})
@@ -621,9 +631,10 @@ def build_parser() -> JsonParser:
     item = group_commands.add_parser("list")
     item.add_argument("--query")
     item.add_argument("--cursor")
+    item = group_commands.add_parser("show")
+    item.add_argument("group_id")
     item = group_commands.add_parser("create")
     item.add_argument("--name", required=True)
-    item.add_argument("--description", default="")
     add_common_write(item)
     member = group_commands.add_parser("member")
     member_commands = member.add_subparsers(dest="member_command", required=True, parser_class=JsonParser)
@@ -715,29 +726,25 @@ def command_action(args, transport):
     if command == "group":
         if args.group_command == "list":
             return "group.list", {"query": args.query, "cursor": args.cursor}
+        if args.group_command == "show":
+            return "group.show", {"group_id": args.group_id}
         if args.group_command == "create":
-            return "group.create", {"name": args.name, "description": args.description}
+            return "group.create", {"display_name": args.name}
         return "group.member_change", {"group_id": args.group_id, "user_id": args.user_id, "expected_revision": args.expected_revision, "change": args.member_command}
     raise CliError("unsupported_command", "unsupported command")
 
 
 def group_member_change(transport, params: dict, request_id: str):
-    cursor = None
-    found = None
-    while True:
-        response = transport.invoke("group.list", {"cursor": cursor}, None)
-        page = response[0] if isinstance(response, tuple) else response
-        if not isinstance(page, dict) or not isinstance(page.get("items"), list):
-            raise CliError("invalid_response", "group list response is invalid", EXIT_REMOTE)
-        found = next((item for item in page["items"] if item.get("id") == params["group_id"]), None)
-        if found or not page.get("next_cursor"):
-            break
-        cursor = page["next_cursor"]
-    if found is None:
-        raise CliError("group_not_found", "group was not found", EXIT_REMOTE)
-    if found.get("revision") != params["expected_revision"] or not isinstance(found.get("members"), list):
-        raise CliError("revision_conflict", "group revision changed or members are unavailable", EXIT_CONFLICT)
-    members = list(dict.fromkeys(found["members"]))
+    # Membership detail is owner-only: read the full group (group.show),
+    # then CAS-replace. A concurrent modification fails the revision check
+    # instead of overwriting someone else's change.
+    response = transport.invoke("group.show", {"group_id": params["group_id"]}, None)
+    detail = response[0] if isinstance(response, tuple) else response
+    if not isinstance(detail, dict) or not isinstance(detail.get("members"), list):
+        raise CliError("invalid_response", "group detail response is invalid", EXIT_REMOTE)
+    if detail.get("revision") != params["expected_revision"]:
+        raise CliError("revision_conflict", "group revision changed; read it again", EXIT_CONFLICT)
+    members = list(dict.fromkeys(detail["members"]))
     if params["change"] == "add" and params["user_id"] not in members:
         members.append(params["user_id"])
     if params["change"] == "remove":
@@ -815,7 +822,7 @@ def main(argv=None) -> int:
             payload.setdefault("idempotency_key", request_id)
         state = payload.get("state")
         emit(payload, secrets)
-        return EXIT_PENDING if status == 202 or state in {"pending", "running"} else EXIT_SUCCESS
+        return EXIT_PENDING if status == 202 or state in {"accepted", "processing", "pending", "running"} else EXIT_SUCCESS
     except RemoteFailure as exc:
         payload = exc.payload if isinstance(exc.payload, dict) else {"code": "http_error", "message": f"service returned HTTP {exc.status}"}
         payload.setdefault("state", "error")

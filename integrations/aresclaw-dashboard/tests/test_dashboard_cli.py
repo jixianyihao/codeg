@@ -197,7 +197,7 @@ class DashboardCliTests(unittest.TestCase):
             config=config,
         )
 
-        self.assertEqual(result.returncode, 50)
+        self.assertEqual(result.returncode, 7)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["state"], "outcome_unknown")
         self.assertEqual(payload["idempotency_key"], request_id)
@@ -303,7 +303,7 @@ class DashboardCliTests(unittest.TestCase):
         server = self.server(response)
         result = self.run_cli("list", config=self.write_config(server.url))
 
-        self.assertEqual(result.returncode, 20)
+        self.assertEqual(result.returncode, 3)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["code"], "invalid_token")
         self.assertEqual(payload["message"], "rejected [redacted]")
@@ -327,7 +327,7 @@ class DashboardCliTests(unittest.TestCase):
 
         result = self.run_cli("list", config=self.write_config(redirect.url))
 
-        self.assertEqual(result.returncode, 70)
+        self.assertEqual(result.returncode, 9)
         self.assertEqual(len(target.requests), 0)
 
     def test_source_writes_only_a_new_relative_workdir_file(self):
@@ -361,22 +361,17 @@ class DashboardCliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.workdir / "downloads" / "source.html").read_bytes(), content)
-        self.assertEqual(escaped.returncode, 40)
+        self.assertEqual(escaped.returncode, 2)
         self.assertFalse((self.workdir.parent / "escape.html").exists())
 
     def test_group_member_add_reads_then_updates_with_expected_revision(self):
         def response(request):
             if request["method"] == "GET":
                 body = {
-                    "items": [
-                        {
-                            "id": "group-1",
-                            "display_name": "Engineering",
-                            "members": ["u-1"],
-                            "revision": 3,
-                        }
-                    ],
-                    "next_cursor": None,
+                    "id": "group-1",
+                    "display_name": "Engineering",
+                    "members": ["u-1"],
+                    "revision": 3,
                 }
             else:
                 body = {"state": "succeeded", "revision": 4}
@@ -400,6 +395,7 @@ class DashboardCliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([request["method"] for request in server.requests], ["GET", "PUT"])
+        self.assertEqual(server.requests[0]["path"], "/api/v1/groups/group-1")
         update = server.requests[1]
         self.assertEqual(update["path"], "/api/v1/groups/group-1/members")
         self.assertEqual(update["headers"]["Idempotency-Key"], request_id)
@@ -412,7 +408,7 @@ class DashboardCliTests(unittest.TestCase):
         supplied = "do-not-echo-this-token"
         result = self.run_cli("--token", supplied, "list")
 
-        self.assertEqual(result.returncode, 40)
+        self.assertEqual(result.returncode, 2)
         self.assertEqual(json.loads(result.stdout)["code"], "raw_token_forbidden")
         self.assertNotIn(supplied, result.stdout + result.stderr)
 
@@ -473,7 +469,7 @@ class DashboardCliTests(unittest.TestCase):
             config=self.write_config(server.url),
         )
 
-        self.assertEqual(result.returncode, 10)
+        self.assertEqual(result.returncode, 6)
         self.assertEqual(json.loads(result.stdout)["idempotency_key"], request_id)
 
 
