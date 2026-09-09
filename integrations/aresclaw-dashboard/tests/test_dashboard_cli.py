@@ -86,6 +86,17 @@ class DashboardCliTests(unittest.TestCase):
         self.servers.append(server)
         return server
 
+    @staticmethod
+    def identity_responder(inner, principal_id="svc-1", principal_type="service"):
+        def responder(request):
+            if request["path"] == "/api/v1/me":
+                body = {"principal_id": principal_id, "principal_type": principal_type,
+                        "display_name": "CI", "scopes": ["read", "write", "manage"]}
+                return 200, {"Content-Type": "application/json"}, json.dumps(body).encode()
+            return inner(request)
+
+        return responder
+
     def write_config(self, service_url, timeout=2):
         path = Path(self.temp.name) / "dashboard-config.json"
         path.write_text(
@@ -110,8 +121,6 @@ class DashboardCliTests(unittest.TestCase):
         for name in list(clean_env):
             if name.lower().endswith("_proxy"):
                 clean_env.pop(name)
-        clean_env.pop("ARESCLAW_DASHBOARD_BRIDGE_URL", None)
-        clean_env.pop("ARESCLAW_DASHBOARD_SESSION_HANDLE", None)
         if env:
             clean_env.update(env)
         return subprocess.run(
@@ -139,7 +148,7 @@ class DashboardCliTests(unittest.TestCase):
             }
             return 200, {"Content-Type": "application/json"}, json.dumps(result).encode()
 
-        server = self.server(publish_response)
+        server = self.server(self.identity_responder(publish_response))
         config = self.write_config(server.url)
         request_id = "40000000-0000-4000-8000-000000000004"
         args = (
@@ -161,8 +170,13 @@ class DashboardCliTests(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(json.loads(first.stdout)["idempotency_key"], request_id)
-        self.assertEqual(len(server.requests), 2)
-        for request in server.requests:
+        writes = [request for request in server.requests if request["method"] == "POST"]
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(
+            [request["path"] for request in server.requests if request["method"] == "GET"],
+            ["/api/v1/me", "/api/v1/me"],
+        )
+        for request in writes:
             self.assertEqual(request["method"], "POST")
             self.assertEqual(request["path"], "/api/v1/dashboards")
             self.assertEqual(request["headers"]["Authorization"], f"Bearer {self.token}")
@@ -221,7 +235,7 @@ class DashboardCliTests(unittest.TestCase):
         def response(_request):
             return 200, {"Content-Type": "application/json"}, b'{"state":"succeeded"}'
 
-        server = self.server(response)
+        server = self.server(self.identity_responder(response))
         config = self.write_config(server.url)
         request_id = "60000000-0000-4000-8000-000000000006"
         args = (
@@ -243,53 +257,157 @@ class DashboardCliTests(unittest.TestCase):
 
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertEqual(len(server.requests), 2)
-        first_body = json.loads(server.requests[0]["body"])
-        second_body = json.loads(server.requests[1]["body"])
+        writes = [request for request in server.requests if request["method"] == "POST"]
+        self.assertEqual(len(writes), 2)
+        first_body = json.loads(writes[0]["body"])
+        second_body = json.loads(writes[1]["body"])
         self.assertEqual(first_body, second_body)
         self.assertEqual(first_body["changes"][0]["expires_at"], "2026-09-12T10:00:00Z")
 
-    def test_conversation_mode_uses_session_bound_invoke_contract(self):
-        session = "opaque-session-handle"
+    def _human_env(self, server, token_file=None):
+        return {
+            "ARESCLAW_DASHBOARD_SERVICE_URL": server.url,
+            "ARESCLAW_DASHBOARD_WORKDIR": str(self.workdir),
+            "ARESCLAW_DASHBOARD_TOKEN_FILE": str(token_file or self.auth_file),
+        }
 
-        def response(_request):
-            return 200, {"Content-Type": "application/json"}, b'{"state":"succeeded","revision":8}'
+    def test_human_mode_reads_token_file_and_sends_human_bearer(self):
+        self.auth_file = Path(self.temp.name) / "auth_token"
+        self.auth_file.write_text("w3-fake-token-for-alice\n", encoding="utf-8")
+
+        def response(request):
+            if request["path"] == "/api/v1/me":
+                body = {"principal_id": "human-1", "principal_type": "human",
+                        "display_name": "Alice", "scopes": ["read", "write", "manage"]}
+                return 200, {"Content-Type": "application/json"}, json.dumps(body).encode()
+            return 200, {"Content-Type": "application/json"}, b'{"state":"succeeded"}'
 
         server = self.server(response)
         request_id = "70000000-0000-4000-8000-000000000007"
         result = self.run_cli(
-            "share",
-            "dashboard-1",
-            "--subject-type",
-            "user",
-            "--subject-id",
-            "u-42",
-            "--role",
-            "editor",
-            "--expires-at",
-            "2026-09-12T18:00:00+08:00",
-            "--expected-revision",
-            "7",
-            "--request-id",
-            request_id,
-            env={
-                "ARESCLAW_DASHBOARD_BRIDGE_URL": server.url,
-                "ARESCLAW_DASHBOARD_SESSION_HANDLE": session,
-            },
+            "share", "dashboard-1", "--subject-type", "user", "--subject-id", "u-42",
+            "--role", "editor", "--expected-revision", "7", "--request-id", request_id,
+            env=self._human_env(server),
         )
-
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(server.requests), 1)
-        request = server.requests[0]
-        self.assertEqual(request["path"], "/invoke")
-        headers = {name.lower(): value for name, value in request["headers"].items()}
-        self.assertEqual(headers["x-aresclaw-dashboard-session"], session)
-        self.assertNotIn("authorization", headers)
-        payload = json.loads(request["body"])
-        self.assertEqual(payload["action"], "dashboard.share")
-        self.assertEqual(payload["request_id"], request_id)
-        self.assertEqual(payload["params"]["expires_at"], "2026-09-12T10:00:00Z")
-        self.assertNotIn(session, result.stdout + result.stderr)
+        paths = [request["path"] for request in server.requests]
+        self.assertEqual(paths, ["/api/v1/me", "/api/v1/dashboards/dashboard-1/grants"])
+        identity, share = server.requests
+        identity_headers = {k.lower(): v for k, v in identity["headers"].items()}
+        share_headers = {k.lower(): v for k, v in share["headers"].items()}
+        self.assertEqual(identity_headers["authorization"], "Bearer w3-fake-token-for-alice")
+        self.assertEqual(identity_headers["x-dashboard-auth-mode"], "human")
+        self.assertEqual(share_headers["x-dashboard-auth-mode"], "human")
+        self.assertNotIn("w3-fake-token-for-alice", result.stdout + result.stderr)
+
+    def test_human_mode_rereads_token_file_on_each_invocation(self):
+        self.auth_file = Path(self.temp.name) / "auth_token"
+        self.auth_file.write_text("w3-token-one\n", encoding="utf-8")
+        tokens = []
+
+        def response(request):
+            tokens.append(request["headers"]["Authorization"])
+            if request["path"] == "/api/v1/me":
+                body = {"principal_id": "human-1", "principal_type": "human",
+                        "display_name": "Alice", "scopes": []}
+                return 200, {"Content-Type": "application/json"}, json.dumps(body).encode()
+            return 200, {"Content-Type": "application/json"}, b'{"items":[]}'
+
+        server = self.server(response)
+        first = self.run_cli("list", env=self._human_env(server))
+        self.auth_file.write_text("w3-token-two\n", encoding="utf-8")
+        second = self.run_cli("list", env=self._human_env(server))
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(tokens, ["Bearer w3-token-one", "Bearer w3-token-two"])
+
+    def test_human_mode_missing_or_empty_token_file_fails_clean(self):
+        self.auth_file = Path(self.temp.name) / "auth_token"
+        server = self.server(lambda request: (200, {"Content-Type": "application/json"}, b"{}"))
+        missing = self.run_cli("list", env=self._human_env(server))
+        self.assertEqual(missing.returncode, 3)
+        self.assertEqual(json.loads(missing.stdout)["code"], "auth_file_missing")
+        self.auth_file.write_text("   \n", encoding="utf-8")
+        empty = self.run_cli("list", env=self._human_env(server))
+        self.assertEqual(empty.returncode, 3)
+        self.assertEqual(json.loads(empty.stdout)["code"], "auth_file_empty")
+        self.assertEqual(len(server.requests), 0)
+
+    def test_human_mode_rejects_service_identity_without_fallback(self):
+        self.auth_file = Path(self.temp.name) / "auth_token"
+        self.auth_file.write_text("w3-fake-token\n", encoding="utf-8")
+
+        def response(request):
+            if request["path"] == "/api/v1/me":
+                body = {"principal_id": "svc-9", "principal_type": "service",
+                        "display_name": "CI", "scopes": []}
+                return 200, {"Content-Type": "application/json"}, json.dumps(body).encode()
+            raise AssertionError("no further calls expected")
+
+        server = self.server(response)
+        request_id = "70000000-0000-4000-8000-00000000000a"
+        result = self.run_cli(
+            "archive", "dashboard-1", "--expected-revision", "2",
+            "--request-id", request_id,
+            env=self._human_env(server),
+        )
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(json.loads(result.stdout)["code"], "principal_type_mismatch")
+        # No write was attempted and the mode never switched to service.
+        self.assertEqual([r["path"] for r in server.requests], ["/api/v1/me"])
+        modes = [{k.lower(): v for k, v in r["headers"].items()}["x-dashboard-auth-mode"]
+                 for r in server.requests]
+        self.assertEqual(modes, ["human"])
+
+    def test_snapshots_bind_to_principal_not_token(self):
+        self.auth_file = Path(self.temp.name) / "auth_token"
+        self.auth_file.write_text("w3-token-a\n", encoding="utf-8")
+        report = self.workdir / "report.html"
+        request_id = "70000000-0000-4000-8000-00000000000b"
+        uploaded = []
+        tokens_seen = []
+
+        def me_for(token):
+            # token A/B are the same employee (renewal); token C is someone else.
+            if token in ("w3-token-a", "w3-token-b"):
+                return {"principal_id": "human-1", "principal_type": "human"}
+            return {"principal_id": "human-2", "principal_type": "human"}
+
+        def response(request):
+            if request["path"] == "/api/v1/me":
+                token = request["headers"]["Authorization"].removeprefix("Bearer ")
+                body = me_for(token) | {"display_name": "X", "scopes": []}
+                return 200, {"Content-Type": "application/json"}, json.dumps(body).encode()
+            tokens_seen.append(request["headers"]["Authorization"])
+            uploaded.append(request["body"])
+            return 201, {"Content-Type": "application/json"}, json.dumps(
+                {"operation_id": request_id, "state": "succeeded"}).encode()
+
+        server = self.server(response)
+        report.write_text("<html>version-1</html>", encoding="utf-8")
+        first = self.run_cli(
+            "publish", "--file", "report.html", "--title", "T",
+            "--request-id", request_id, env=self._human_env(server))
+        self.assertEqual(first.returncode, 0, first.stderr)
+        # Same user renews the token; the local file changed after freezing.
+        self.auth_file.write_text("w3-token-b\n", encoding="utf-8")
+        report.write_text("<html>version-2-tampered</html>", encoding="utf-8")
+        second = self.run_cli(
+            "publish", "--file", "report.html", "--title", "T",
+            "--request-id", request_id, env=self._human_env(server))
+        self.assertEqual(second.returncode, 0, second.stderr)
+        # The frozen bytes are reused: no re-read of the changed file.
+        self.assertIn(b"version-1", uploaded[0])
+        self.assertIn(b"version-1", uploaded[1])
+        self.assertNotIn(b"tampered", uploaded[1])
+        # A different user must not continue the first user's operation.
+        self.auth_file.write_text("w3-token-c\n", encoding="utf-8")
+        third = self.run_cli(
+            "publish", "--file", "report.html", "--title", "T",
+            "--request-id", request_id, env=self._human_env(server))
+        self.assertEqual(third.returncode, 0, third.stderr)
+        self.assertIn(b"version-2-tampered", uploaded[2])
+        self.assertNotEqual(uploaded[2], uploaded[0])
 
     def test_http_error_is_json_classified_and_redacted(self):
         def response(_request):
@@ -365,7 +483,7 @@ class DashboardCliTests(unittest.TestCase):
         self.assertFalse((self.workdir.parent / "escape.html").exists())
 
     def test_group_member_add_reads_then_updates_with_expected_revision(self):
-        def response(request):
+        def inner(request):
             if request["method"] == "GET":
                 body = {
                     "id": "group-1",
@@ -377,7 +495,7 @@ class DashboardCliTests(unittest.TestCase):
                 body = {"state": "succeeded", "revision": 4}
             return 200, {"Content-Type": "application/json"}, json.dumps(body).encode()
 
-        server = self.server(response)
+        server = self.server(self.identity_responder(inner))
         request_id = "80000000-0000-4000-8000-000000000008"
         result = self.run_cli(
             "group",
@@ -394,9 +512,10 @@ class DashboardCliTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([request["method"] for request in server.requests], ["GET", "PUT"])
-        self.assertEqual(server.requests[0]["path"], "/api/v1/groups/group-1")
-        update = server.requests[1]
+        business = [r for r in server.requests if r["path"] != "/api/v1/me"]
+        self.assertEqual([request["method"] for request in business], ["GET", "PUT"])
+        self.assertEqual(business[0]["path"], "/api/v1/groups/group-1")
+        update = business[1]
         self.assertEqual(update["path"], "/api/v1/groups/group-1/members")
         self.assertEqual(update["headers"]["Idempotency-Key"], request_id)
         self.assertEqual(
@@ -416,7 +535,7 @@ class DashboardCliTests(unittest.TestCase):
         def response(_request):
             return 200, {"Content-Type": "application/json"}, b"{}"
 
-        server = self.server(response)
+        server = self.server(self.identity_responder(response))
         config = self.write_config(server.url)
         request_ids = [
             f"90000000-0000-4000-8000-{index:012d}" for index in range(1, 10)
@@ -445,18 +564,19 @@ class DashboardCliTests(unittest.TestCase):
             result = self.run_cli(*args, config=config)
             self.assertEqual(result.returncode, 0, (args, result.stdout, result.stderr))
 
-        self.assertEqual(len(server.requests), len(cases))
-        for request, (_args, method, path) in zip(server.requests, cases):
+        business = [r for r in server.requests if r["path"] != "/api/v1/me"]
+        self.assertEqual(len(business), len(cases))
+        for request, (_args, method, path) in zip(business, cases):
             self.assertEqual(request["method"], method)
             self.assertEqual(request["path"], path)
 
     def test_pending_response_has_distinct_exit_code_and_request_id(self):
         server = self.server(
-            lambda _request: (
+            self.identity_responder(lambda _request: (
                 202,
                 {"Content-Type": "application/json"},
                 b'{"state":"pending","operation_id":"op-1"}',
-            )
+            ))
         )
         request_id = "a0000000-0000-4000-8000-000000000001"
         result = self.run_cli(

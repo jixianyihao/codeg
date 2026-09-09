@@ -7,15 +7,19 @@ boundary.
 
 ## Modes
 
-Conversation mode is the default. The AresClaw host injects
-`ARESCLAW_DASHBOARD_BRIDGE_URL` and
-`ARESCLAW_DASHBOARD_SESSION_HANDLE`. The CLI posts only allowlisted actions to
-`/invoke`; the host resolves the authenticated W3 session, reads or writes
-workspace files, and calls the fixed dashboard service. Neither value is
-accepted as a command argument or printed.
+Human mode is the default. The existing runtime environment pre-writes the
+current user's W3 token to `/root/.config/auth_token`; every CLI invocation
+loads that file fresh and calls the fixed dashboard service directly with
+`Authorization: Bearer` and `X-Dashboard-Auth-Mode: human`. The CLI never
+writes, refreshes, or echoes the token. The service URL and workdir come
+from `ARESCLAW_DASHBOARD_SERVICE_URL` / `ARESCLAW_DASHBOARD_WORKDIR`
+(or an optional `--config` JSON). Writes first verify the signed-in
+principal via `/me`; frozen request snapshots are bound to the service
+origin, the verified `principal_id`, and the request id, so a renewed token
+of the same user can resume an operation while a different user cannot.
 
 Integration mode directly calls a fixed service origin with a service-account
-JWT:
+JWT (requires `--config`; `token_file` is mandatory):
 
 ```json
 {
@@ -67,7 +71,7 @@ current member set, verify the supplied group revision, and update it with CAS.
 ## Output and exit codes
 
 Business results and errors are one JSON object on stdout. Diagnostics use
-stderr and never contain the configured JWT or session handle.
+stderr and never contain the loaded credential.
 
 | Code | Meaning |
 | ---: | --- |

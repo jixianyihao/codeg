@@ -191,15 +191,6 @@ def validated_origin(value: str) -> str:
     return value.rstrip("/")
 
 
-def validated_bridge_url(value: str) -> str:
-    parsed = urllib.parse.urlsplit(value)
-    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
-        raise CliError("invalid_bridge", "conversation bridge must use an HTTP loopback address")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise CliError("invalid_bridge", "conversation bridge URL is invalid")
-    return value.rstrip("/") + "/invoke"
-
-
 class HttpClient:
     def __init__(self, base_url: str, timeout: float, token: str | None = None,
                  session: str | None = None, auth_mode: str | None = None):
@@ -259,69 +250,146 @@ def multipart(metadata: dict, html: bytes) -> tuple[bytes, str]:
     return body, f"multipart/form-data; boundary={boundary}"
 
 
-class IntegrationTransport:
-    def __init__(self, config_path: str):
-        path = Path(config_path).resolve(strict=True)
-        try:
-            config = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise CliError("invalid_config", "could not read integration config") from exc
-        if not isinstance(config, dict):
-            raise CliError("invalid_config", "integration config must be a JSON object")
-        allowed = {"service_url", "workdir", "token_file", "timeout_seconds"}
-        if set(config) - allowed or not {"service_url", "workdir", "token_file"}.issubset(config):
-            raise CliError("invalid_config", "integration config fields are invalid")
-        self.workdir = self._config_path(path.parent, config["workdir"], "workdir")
-        if not self.workdir.is_dir():
-            raise CliError("invalid_config", "workdir must be a directory")
-        token_path = self._config_path(path.parent, config["token_file"], "token_file")
-        if not token_path.is_file() or is_reparse(token_path):
-            raise CliError("invalid_config", "token_file must be a regular non-link file")
-        try:
-            token = token_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise CliError("invalid_config", "could not read token_file") from exc
-        if not token or len(token) > 16384 or "\n" in token or "\r" in token:
-            raise CliError("invalid_config", "token_file must contain exactly one token")
-        try:
-            timeout = float(config.get("timeout_seconds", 30))
-        except (TypeError, ValueError) as exc:
-            raise CliError("invalid_config", "timeout_seconds must be a number") from exc
-        if not 0 < timeout <= 300:
-            raise CliError("invalid_config", "timeout_seconds must be between 0 and 300")
-        self.secrets = [token]
-        # Integration mode always selects the service verifier; the human
-        # branch is never attempted (contracts.md section 1).
-        self.client = HttpClient(validated_origin(str(config["service_url"])), timeout,
-                                 token=token, auth_mode="service")
+DEFAULT_TOKEN_FILE = "/root/.config/auth_token"
+TOKEN_JSON_KEYS = ("access_token", "token", "id_token", "w3_token")
 
-    @staticmethod
-    def _config_path(base: Path, value: object, label: str) -> Path:
-        if not isinstance(value, str) or not value:
-            raise CliError("invalid_config", f"{label} must be a path")
-        candidate = Path(value)
-        if not candidate.is_absolute():
-            candidate = base / candidate
+
+def load_transport_config(config_path: str, *, require_token_file: bool) -> dict:
+    """Fixed deployment config shared by both modes: service_url, workdir,
+    token_file, optional timeout_seconds. token_file is mandatory for
+    integration; human mode falls back to the environment-provided file."""
+    path = Path(config_path).resolve(strict=True)
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CliError("invalid_config", "could not read dashboard config") from exc
+    if not isinstance(config, dict):
+        raise CliError("invalid_config", "dashboard config must be a JSON object")
+    allowed = {"service_url", "workdir", "token_file", "timeout_seconds"}
+    if set(config) - allowed or "service_url" not in config or "workdir" not in config:
+        raise CliError("invalid_config", "dashboard config fields are invalid")
+    if require_token_file and "token_file" not in config:
+        raise CliError("invalid_config", "integration config must provide its own token_file")
+    config["_base"] = path.parent
+    return config
+
+
+def read_credential_file(path: Path) -> str:
+    """Load the credential written by the existing environment.
+
+    The producer owns this file; the CLI only reads it fresh on every
+    invocation and never echoes it. Accepts a bare single-line UTF-8 token
+    or a JSON object carrying the token under a common field.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise CliError("auth_file_missing", "credential file does not exist", EXIT_AUTH) from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CliError("auth_file_unreadable", "credential file cannot be read", EXIT_AUTH) from exc
+    text = raw.strip()
+    if not text:
+        raise CliError("auth_file_empty", "credential file is empty", EXIT_AUTH)
+    token = text
+    if text.startswith("{"):
         try:
-            return candidate.resolve(strict=True)
-        except OSError as exc:
-            raise CliError("invalid_config", f"{label} does not exist") from exc
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise CliError("auth_file_invalid", "credential file is not valid JSON", EXIT_AUTH) from exc
+        if not isinstance(parsed, dict):
+            raise CliError("auth_file_invalid", "credential file must be an object or a bare token", EXIT_AUTH)
+        token = ""
+        for key in TOKEN_JSON_KEYS:
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                token = value.strip()
+                break
+        if not token:
+            raise CliError("auth_file_invalid", "credential object has no token field", EXIT_AUTH)
+    if len(token) > 16384 or any(character.isspace() for character in token):
+        raise CliError("auth_file_invalid", "credential is malformed", EXIT_AUTH)
+    return token
+
+
+def _resolve_config_path(base: Path, value: object, label: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise CliError("invalid_config", f"{label} must be a path")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    try:
+        return candidate.resolve(strict=True)
+    except OSError as exc:
+        raise CliError("invalid_config", f"{label} does not exist") from exc
+
+
+class DirectTransport:
+    """Direct HTTP transport shared by both credential modes.
+
+    Subclasses only decide where the credential comes from and which fixed
+    auth-mode header is sent; command mapping, upload, freezing and error
+    handling are identical. A failed branch never falls back to the other.
+    """
+
+    auth_mode = "human"
+
+    def __init__(self, service_url: str, workdir: Path, token: str, timeout: float = 30.0):
+        self.origin = validated_origin(service_url)
+        self.workdir = workdir
+        self.secrets = [token]
+        self.client = HttpClient(self.origin, timeout, token=token, auth_mode=self.auth_mode)
+        self._principal: dict | None = None
+
+    def principal(self) -> dict:
+        """Verified stable principal via /me — required before any write or
+        snapshot reuse. The token itself (or its digest) is never the user
+        identity: the service resolves the stable principal."""
+        if self._principal is None:
+            _status, _headers, response = self.client.request("GET", "/api/v1/me")
+            payload = parse_json_bytes(response)
+            if not isinstance(payload, dict) or not payload.get("principal_id"):
+                raise CliError("invalid_response", "service identity response is invalid", EXIT_REMOTE)
+            expected = "human" if self.auth_mode == "human" else "service"
+            if payload.get("principal_type") != expected:
+                raise CliError(
+                    "principal_type_mismatch",
+                    f"credential is not a {expected} identity on this service",
+                    EXIT_AUTH,
+                )
+            self._principal = {
+                "principal_id": payload["principal_id"],
+                "principal_type": payload["principal_type"],
+            }
+        return self._principal
+
+    # -------------------------------------------------- frozen request state
+
+    def _state_dir(self) -> Path:
+        """Snapshots are isolated per service origin and verified principal;
+        the same user with a renewed token keeps the namespace, a different
+        user never reuses it."""
+        origin_key = hashlib.sha256(self.origin.encode("utf-8")).hexdigest()[:16]
+        principal = self.principal()
+        marker = self.workdir / ".aresclaw-dashboard"
+        if marker.exists() and is_reparse(marker):
+            raise CliError("unsafe_path", "request state directory is a link")
+        state = marker / "requests" / origin_key / principal["principal_id"]
+        state.mkdir(parents=True, exist_ok=True)
+        return state
 
     def freeze_publish(self, params: dict, request_id: str) -> dict:
         source = safe_input(self.workdir, params["path"])
         descriptor = {
             "kind": "publish",
+            "service_origin": self.origin,
+            "principal_id": self.principal()["principal_id"],
             "path": relative_path(params["path"], "file"),
             "title": params["title"],
             "description": params.get("description", ""),
             "dashboard_id": params.get("dashboard_id"),
             "expected_revision": params.get("expected_revision"),
         }
-        state_dir = self.workdir / ".aresclaw-dashboard" / "requests"
-        if (self.workdir / ".aresclaw-dashboard").exists() and is_reparse(self.workdir / ".aresclaw-dashboard"):
-            raise CliError("unsafe_path", "request state directory is a link")
-        state_dir.mkdir(parents=True, exist_ok=True)
-        state_path = state_dir / f"publish-{request_id}.json"
+        state_path = self._state_dir() / f"publish-{request_id}.json"
         if state_path.exists():
             try:
                 frozen = json.loads(state_path.read_text(encoding="utf-8"))
@@ -356,17 +424,13 @@ class IntegrationTransport:
     ) -> list:
         descriptor = {
             "kind": "access_apply",
+            "service_origin": self.origin,
+            "principal_id": self.principal()["principal_id"],
             "path": relative_path(path_value, "changes file"),
             "dashboard_id": dashboard_id,
             "expected_revision": expected_revision,
         }
-        state_dir = self.workdir / ".aresclaw-dashboard" / "requests"
-        if (self.workdir / ".aresclaw-dashboard").exists() and is_reparse(
-            self.workdir / ".aresclaw-dashboard"
-        ):
-            raise CliError("unsafe_path", "request state directory is a link")
-        state_dir.mkdir(parents=True, exist_ok=True)
-        state_path = state_dir / f"access-{request_id}.json"
+        state_path = self._state_dir() / f"access-{request_id}.json"
         if state_path.exists():
             try:
                 frozen = json.loads(state_path.read_text(encoding="utf-8"))
@@ -405,6 +469,8 @@ class IntegrationTransport:
                 path_value, dashboard_id, expected_revision, request_id
             )
         return changes
+
+    # -------------------------------------------------- REST command mapping
 
     def invoke(self, action: str, params: dict, request_id: str | None):
         quote = lambda value: urllib.parse.quote(str(value), safe="")
@@ -468,11 +534,11 @@ class IntegrationTransport:
             body = json_bytes({"expected_revision": params["expected_revision"]})
         elif action == "group.list":
             path = "/api/v1/groups?" + query({"q": params.get("query"), "cursor": params.get("cursor")})
+        elif action == "group.show":
+            path = f"/api/v1/groups/{quote(params['group_id'])}"
         elif action == "group.create":
             method, path = "POST", "/api/v1/groups"
             body = json_bytes({"display_name": params["display_name"]})
-        elif action == "group.show":
-            path = f"/api/v1/groups/{quote(params['group_id'])}"
         elif action == "group.set_members":
             method, path = "PUT", f"/api/v1/groups/{quote(params['group_id'])}/members"
             body = json_bytes({"members": params["members"], "expected_revision": params["expected_revision"]})
@@ -491,26 +557,74 @@ class IntegrationTransport:
         return parse_json_bytes(response), status
 
 
-class ConversationTransport:
-    def __init__(self):
-        bridge = os.environ.get("ARESCLAW_DASHBOARD_BRIDGE_URL")
-        session = os.environ.get("ARESCLAW_DASHBOARD_SESSION_HANDLE")
-        if not bridge or not session:
-            raise CliError("conversation_unavailable", "dashboard conversation context is unavailable", EXIT_AUTH)
-        if len(session) > 4096 or "\n" in session or "\r" in session:
-            raise CliError("conversation_unavailable", "dashboard conversation context is invalid", EXIT_AUTH)
-        self.secrets = [session]
-        invoke_url = validated_bridge_url(bridge)
-        parsed = urllib.parse.urlsplit(invoke_url)
-        origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
-        self.path = parsed.path
-        self.client = HttpClient(origin, 30, session=session)
+class IntegrationTransport(DirectTransport):
+    """Machine-to-machine: an operator-issued service JWT loaded from the
+    config's own token file; the fixed service verifier branch."""
 
-    def invoke(self, action: str, params: dict, request_id: str | None):
-        effective_request_id = request_id or str(uuid.uuid4())
-        body = json_bytes({"action": action, "params": params, "request_id": effective_request_id})
-        status, _headers, response = self.client.request("POST", self.path, body=body, headers={"Content-Type": "application/json"})
-        return parse_json_bytes(response), status
+    auth_mode = "service"
+
+    def __init__(self, config_path: str):
+        config = load_transport_config(config_path, require_token_file=True)
+        base = config["_base"]
+        self.workdir = _resolve_config_path(base, config["workdir"], "workdir")
+        if not self.workdir.is_dir():
+            raise CliError("invalid_config", "workdir must be a directory")
+        token_path = _resolve_config_path(base, config["token_file"], "token_file")
+        if not token_path.is_file() or is_reparse(token_path):
+            raise CliError("invalid_config", "token_file must be a regular non-link file")
+        token = read_credential_file(token_path)
+        try:
+            timeout = float(config.get("timeout_seconds", 30))
+        except (TypeError, ValueError) as exc:
+            raise CliError("invalid_config", "timeout_seconds must be a number") from exc
+        if not 0 < timeout <= 300:
+            raise CliError("invalid_config", "timeout_seconds must be between 0 and 300")
+        super().__init__(str(config["service_url"]), self.workdir, token, timeout)
+
+
+class HumanTransport(DirectTransport):
+    """Default mode: the existing environment pre-writes the current user's
+    W3 token (default /root/.config/auth_token); each CLI run loads it
+    fresh and calls the public API directly as a human."""
+
+    auth_mode = "human"
+
+    def __init__(self, config_path: str | None):
+        service_url = ""
+        workdir_value = ""
+        token_value = ""
+        timeout = 30.0
+        if config_path:
+            config = load_transport_config(config_path, require_token_file=False)
+            base = config["_base"]
+            service_url = str(config["service_url"])
+            workdir_value = str(config["workdir"])
+            token_value = str(config.get("token_file", ""))
+            try:
+                timeout = float(config.get("timeout_seconds", 30))
+            except (TypeError, ValueError) as exc:
+                raise CliError("invalid_config", "timeout_seconds must be a number") from exc
+            if not 0 < timeout <= 300:
+                raise CliError("invalid_config", "timeout_seconds must be between 0 and 300")
+        if not service_url:
+            service_url = os.environ.get("ARESCLAW_DASHBOARD_SERVICE_URL", "").strip()
+        if not service_url:
+            raise CliError("invalid_config", "human mode needs service_url from config or ARESCLAW_DASHBOARD_SERVICE_URL")
+        if not workdir_value:
+            workdir_value = os.environ.get("ARESCLAW_DASHBOARD_WORKDIR", "").strip() or str(Path.cwd())
+        workdir = Path(workdir_value).resolve(strict=True)
+        if not workdir.is_dir():
+            raise CliError("invalid_config", "workdir must be a directory")
+        token_path_text = (
+            token_value
+            or os.environ.get("ARESCLAW_DASHBOARD_TOKEN_FILE", "").strip()
+            or DEFAULT_TOKEN_FILE
+        )
+        token_path = Path(token_path_text)
+        if not token_path.is_absolute():
+            raise CliError("invalid_config", "credential file path must be absolute")
+        token = read_credential_file(token_path)
+        super().__init__(service_url, workdir, token, timeout)
 
 
 def read_access_changes(workdir: Path, path_value: str) -> list:
@@ -546,7 +660,7 @@ def add_common_write(parser, revision=False):
 
 def build_parser() -> JsonParser:
     parser = JsonParser(prog="dashboard")
-    parser.add_argument("--auth-mode", choices=["conversation", "integration"], default="conversation")
+    parser.add_argument("--auth-mode", choices=["human", "integration"], default="human")
     parser.add_argument("--config")
     commands = parser.add_subparsers(dest="command", required=True, parser_class=JsonParser)
     commands.add_parser("new-request-id")
@@ -662,8 +776,7 @@ def command_action(args, transport):
         params = {"path": relative_path(args.file, "file"), "title": args.title, "description": args.description}
         if args.dashboard_id:
             params.update({"dashboard_id": args.dashboard_id, "expected_revision": args.expected_revision})
-        if isinstance(transport, IntegrationTransport):
-            params = transport.freeze_publish(params, args.request_id)
+        params = transport.freeze_publish(params, args.request_id)
         return "dashboard.publish", params
     if command == "operation":
         params = {"operation_id": args.operation_id} if args.operation_id else {"request_id": args.request_id}
@@ -710,17 +823,13 @@ def command_action(args, transport):
         return "dashboard.access", {"dashboard_id": args.dashboard_id, "subject_id": args.subject_id}
     if command == "access-apply":
         path_value = relative_path(args.file, "changes file")
-        if isinstance(transport, ConversationTransport):
-            key, changes = "path", path_value
-        else:
-            key = "changes"
-            changes = transport.freeze_access_changes(
-                path_value,
-                args.dashboard_id,
-                args.expected_revision,
-                args.request_id,
-            )
-        return "dashboard.access_apply", {"dashboard_id": args.dashboard_id, "expected_revision": args.expected_revision, key: changes}
+        changes = transport.freeze_access_changes(
+            path_value,
+            args.dashboard_id,
+            args.expected_revision,
+            args.request_id,
+        )
+        return "dashboard.access_apply", {"dashboard_id": args.dashboard_id, "expected_revision": args.expected_revision, "changes": changes}
     if command in {"archive", "restore"}:
         return f"dashboard.{command}", {"dashboard_id": args.dashboard_id, "expected_revision": args.expected_revision}
     if command == "group":
@@ -796,20 +905,27 @@ def main(argv=None) -> int:
         if args.command == "new-request-id":
             emit({"request_id": str(uuid.uuid4())})
             return EXIT_SUCCESS
+        # Captured before any network work: an uncertain death during
+        # principal resolution or freezing still classifies as a write with
+        # unknown outcome.
+        request_id = getattr(args, "request_id", None) if args.command != "operation" else None
         if args.auth_mode == "integration":
             if not args.config:
                 raise CliError("config_required", "integration mode requires --config")
             transport = IntegrationTransport(args.config)
         else:
-            if args.config:
-                raise CliError("invalid_config", "--config is only valid in integration mode")
-            transport = ConversationTransport()
+            transport = HumanTransport(args.config)
         secrets = transport.secrets
         action, params = command_action(args, transport)
-        request_id = getattr(args, "request_id", None) if action != "dashboard.operation" else None
+        if request_id and action == "dashboard.operation":
+            request_id = None
         if request_id:
             request_id = validate_uuid(request_id, "request-id")
         is_write = action in WRITE_ACTIONS or action == "group.member_change"
+        if is_write:
+            # Verified stable principal before any write or snapshot reuse;
+            # also enforces the human/service branch up front.
+            transport.principal()
         if action == "group.member_change":
             response = group_member_change(transport, params, request_id)
         else:
@@ -831,7 +947,7 @@ def main(argv=None) -> int:
         emit(payload, secrets)
         return remote_exit(exc.status)
     except NetworkFailure:
-        if is_write and request_id:
+        if is_write or request_id:
             emit({"state": "outcome_unknown", "code": "network_outcome_unknown", "message": "request outcome is unknown; query operation with the same request ID", "idempotency_key": request_id}, secrets)
             return EXIT_UNKNOWN
         emit({"state": "error", "code": "network_error", "message": "dashboard service is unavailable"}, secrets)
@@ -844,6 +960,9 @@ def main(argv=None) -> int:
         return exc.exit_code
     except (OSError, ValueError) as exc:
         emit({"state": "error", "code": "local_error", "message": "dashboard CLI could not complete the local operation"}, secrets)
+        if os.environ.get("DASHBOARD_CLI_TRACE"):
+            import traceback
+            traceback.print_exc()
         print(type(exc).__name__, file=sys.stderr)
         return EXIT_INPUT
 
