@@ -62,8 +62,7 @@ def create_content_app(service: Service) -> FastAPI:
                 raise ApiError(503, "recovery_isolation",
                                "Service is isolated for recovery")
             version = service.capabilities.resolve(token)
-            html = service.store.read_version(
-                version["storage_key"], version["sha256"], version["byte_size"])
+            html = service.store.read_version(version)
             return Response(
                 html, media_type="text/plain; charset=utf-8",
                 headers={

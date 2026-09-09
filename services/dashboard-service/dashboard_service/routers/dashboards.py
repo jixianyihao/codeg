@@ -241,8 +241,7 @@ async def get_source(dashboard_id: str, version_id: str, request: Request,
                     models.dashboard_versions.c.dashboard_id == dashboard_id)
             ).mappings().one_or_none()
             require(version is not None, 404, "not_found", "Version is not visible")
-            content = service.store.read_version(
-                version["storage_key"], version["sha256"], version["byte_size"])
+            content = service.store.read_version(version)
             return Response(
                 content, media_type="text/plain; charset=utf-8",
                 headers={

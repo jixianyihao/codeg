@@ -26,10 +26,18 @@ from dashboard_service.operator import Operator
 from dashboard_service.routers import build_service
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
+TEST_S3_ENDPOINT = os.environ.get("TEST_S3_ENDPOINT_URL", "http://127.0.0.1:19000")
+TEST_S3_BUCKET = os.environ.get("TEST_S3_BUCKET", "aresclaw-dash-test")
 
 requires_mysql = pytest.mark.skipif(
     not TEST_DATABASE_URL.startswith("mysql+pymysql://"),
     reason="TEST_DATABASE_URL must point at a dedicated MySQL test database")
+
+# The test S3 endpoint is a real S3-compatible server (MinIO) with fixed
+# throwaway credentials — never a production endpoint.
+os.environ.setdefault("AWS_ACCESS_KEY_ID", "minioadmin")
+os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "minioadmin")
+os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 
 
 class FakeW3:
@@ -82,6 +90,20 @@ def mysql_url():
     return TEST_DATABASE_URL
 
 
+@pytest.fixture(scope="session", autouse=True)
+def s3_test_bucket(mysql_url):
+    """Ensure the dedicated test bucket exists on the real S3 endpoint."""
+    import boto3
+    client = boto3.client("s3", endpoint_url=TEST_S3_ENDPOINT)
+    try:
+        client.head_bucket(Bucket=TEST_S3_BUCKET)
+    except Exception:
+        try:
+            client.create_bucket(Bucket=TEST_S3_BUCKET)
+        except Exception as error:
+            pytest.skip(f"test S3 endpoint unavailable: {type(error).__name__}")
+
+
 @pytest.fixture(scope="session")
 def migrated_database(mysql_url):
     """One schema migration per session (downgrade → upgrade), real MySQL."""
@@ -114,9 +136,12 @@ def bundle(migrated_database, tmp_path):
                            .prefix_with("IGNORE").values(id=1, revision=1))
     config = Config.for_testing(
         TEST_DATABASE_URL,
-        storage_dir=tmp_path / "content",
+        storage_dir=tmp_path / "staging",
         control_origin="http://127.0.0.1:18080",
         content_origin="http://127.0.0.1:18081",
+        s3_endpoint_url=TEST_S3_ENDPOINT,
+        s3_bucket=TEST_S3_BUCKET,
+        s3_prefix="test/",
     )
     verifier = FakeW3()
     authenticator = Authenticator(config, migrated_database, verifier)

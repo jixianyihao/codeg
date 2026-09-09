@@ -96,13 +96,16 @@ dashboard_versions = Table(
     Column("id", ID, primary_key=True),
     Column("dashboard_id", ID, ForeignKey("dashboards.id"), nullable=False),
     Column("number", Integer, nullable=False),
-    Column("storage_key", String(64, collation="ascii_bin"), nullable=False, unique=True),
+    Column("storage_bucket", String(63, collation="ascii_bin"), nullable=False),
+    Column("storage_key", String(512, collation="ascii_bin"), nullable=False),
+    Column("object_version_id", String(64, collation="ascii_bin"), nullable=True),
     Column("sha256", String(64, collation="ascii_bin"), nullable=False),
     Column("byte_size", BigInteger, nullable=False),
     Column("created_by", ID, ForeignKey("principals.id"), nullable=False),
     Column("created_at", DT, nullable=False),
     UniqueConstraint("dashboard_id", "number", name="uq_versions_dashboard_number"),
     UniqueConstraint("dashboard_id", "id", name="uq_versions_dashboard_id"),
+    UniqueConstraint("storage_bucket", "storage_key", name="uq_versions_storage_object"),
     Index("ix_versions_dashboard_created", "dashboard_id", "created_at"),
 )
 
@@ -183,12 +186,23 @@ quota_usage = Table(
 upload_reservations = Table(
     "upload_reservations", metadata,
     Column("operation_id", ID, primary_key=True),
-    Column("attempt_id", ID, nullable=False),
+    Column("attempt_id", ID, primary_key=True),
     Column("owner_id", ID, nullable=False),
+    # Object coordinates for this attempt; NULL until the S3 PUT succeeds.
+    Column("dashboard_id", ID, nullable=False),
+    Column("version_id", ID, nullable=False),
+    Column("storage_bucket", String(63, collation="ascii_bin"), nullable=True),
+    Column("storage_key", String(512, collation="ascii_bin"), nullable=True),
+    Column("object_version_id", String(64, collation="ascii_bin"), nullable=True),
+    # reserved → uploaded → committed | cleanup_pending → deleted
+    Column("state", String(16, collation="ascii_bin"), nullable=False),
     Column("reserved_bytes", BigInteger, nullable=False),
     Column("reserved_count", Integer, nullable=False),
     Column("expires_at", DT, nullable=False),
+    CheckConstraint("state IN ('reserved','uploaded','committed','cleanup_pending','deleted')",
+                    name="ck_reservations_state"),
     Index("ix_reservations_expiry", "expires_at"),
+    Index("ix_reservations_state", "state"),
 )
 
 audit_events = Table(

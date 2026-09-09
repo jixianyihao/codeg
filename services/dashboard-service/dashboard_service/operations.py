@@ -123,9 +123,16 @@ class Operations:
     def begin_staged(self, connection, actor: AuthContext, key: str, *, action: str,
                      method: str, path: str, target_id: str | None, payload,
                      new_dashboard: bool, byte_size: int,
-                     quota_owner_id: str | None = None) -> tuple[str, str] | dict:
-        """Occupy the key for a multi-stage publish. Returns (operation_id,
-        attempt_id) to proceed, or a finished wrapper dict to return."""
+                     quota_owner_id: str | None = None) -> dict:
+        """Occupy the key and reserve quota for a staged publish.
+
+        Returns a dict describing the attempt (operation_id, attempt_id,
+        dashboard_id, version_id, object_key) to proceed, or a finished
+        wrapper dict to return to the caller (202 / replayed result).
+        Object coordinates are fixed here so S3 keys are deterministic and
+        never collide between attempts.
+        """
+        from .storage import build_object_key
         fingerprint = request_hash(method, path, payload)
         existing = self.find(connection, actor.principal_id, key)
         if existing is not None:
@@ -144,28 +151,32 @@ class Operations:
             require(wrapper["state"] == "failed" and (wrapper["error"] or {}).get("retryable"),
                     409, "idempotency_conflict",
                     "This idempotency key already completed; use a new key for a new operation")
-            # Explicit same-key retry of an interrupted operation: resume it.
             connection.execute(models.operations.update().where(
                 models.operations.c.id == existing["id"]).values(
                 state="accepted", request_hash=fingerprint, updated_at=to_db(now())))
             operation_id, attempt = existing["id"], new_id()
-            # Drop any leftover reservation so the fresh attempt cannot
-            # double-reserve quota (recovery usually did this already).
             self.release_reservation(connection, operation_id)
         else:
             self.check_rate(connection, actor.principal_id)
             operation_id, attempt = new_id(), new_id()
+        quota_owner = quota_owner_id or actor.principal_id
+        dashboard_id = target_id or new_id()
+        version_id = new_id()
+        object_key = build_object_key(self.config.s3_prefix, dashboard_id,
+                                      version_id, attempt)
         moment = now()
         lease_until = moment + timedelta(seconds=self.config.operation_lease_seconds)
-        # Quota always belongs to the dashboard owner; an editor's upload
-        # consumes the owner's allocation, not the editor's.
-        quota_owner = quota_owner_id or actor.principal_id
-        connection.execute(models.quota_usage.insert().prefix_with("IGNORE").values(
-            scope="global", owner_id="*", used_bytes=0, reserved_bytes=0,
-            dashboard_count=0, reserved_count=0))
-        connection.execute(models.quota_usage.insert().prefix_with("IGNORE").values(
-            scope="owner", owner_id=quota_owner, used_bytes=0, reserved_bytes=0,
-            dashboard_count=0, reserved_count=0))
+        for scope, owner in (("global", "*"), ("owner", quota_owner)):
+            connection.execute(models.quota_usage.insert().prefix_with("IGNORE").values(
+                scope=scope, owner_id=owner, used_bytes=0, reserved_bytes=0,
+                dashboard_count=0, reserved_count=0))
+        count_delta = 1 if new_dashboard else 0
+        for scope, owner in (("owner", quota_owner), ("global", "*")):
+            connection.execute(models.quota_usage.update().where(
+                models.quota_usage.c.scope == scope,
+                models.quota_usage.c.owner_id == owner).values(
+                reserved_bytes=models.quota_usage.c.reserved_bytes + byte_size,
+                reserved_count=models.quota_usage.c.reserved_count + count_delta))
         if existing is None:
             connection.execute(models.operations.insert().values(
                 id=operation_id, principal_id=actor.principal_id, idempotency_key=key,
@@ -181,18 +192,119 @@ class Operations:
                 updated_at=to_db(moment)))
         connection.execute(models.upload_reservations.insert().values(
             operation_id=operation_id, attempt_id=attempt, owner_id=quota_owner,
-            reserved_bytes=byte_size, reserved_count=1 if new_dashboard else 0,
+            dashboard_id=dashboard_id, version_id=version_id,
+            storage_bucket=self.config.s3_bucket, storage_key=object_key,
+            object_version_id=None, state="reserved",
+            reserved_bytes=byte_size, reserved_count=count_delta,
             expires_at=to_db(lease_until)))
-        # Reflect the reservation on the quota rows themselves so concurrent
-        # check_headroom calls see used+reserved correctly.
-        count_delta = 1 if new_dashboard else 0
-        for scope, owner in (("owner", quota_owner), ("global", "*")):
+        return {"operation_id": operation_id, "attempt_id": attempt,
+                "dashboard_id": dashboard_id, "version_id": version_id,
+                "object_key": object_key}
+
+    # ------------------------------------------------- attempt reservations
+
+    def reservation(self, connection, operation_id: str, attempt_id: str):
+        return connection.execute(
+            select(models.upload_reservations).where(
+                models.upload_reservations.c.operation_id == operation_id,
+                models.upload_reservations.c.attempt_id == attempt_id)
+        ).mappings().one_or_none()
+
+    def mark_uploaded(self, connection, operation_id: str, attempt_id: str,
+                      object_version_id: str | None) -> None:
+        connection.execute(models.upload_reservations.update().where(
+            models.upload_reservations.c.operation_id == operation_id,
+            models.upload_reservations.c.attempt_id == attempt_id).values(
+            state="uploaded", object_version_id=object_version_id))
+
+    def mark_cleanup_pending(self, connection, operation_id: str,
+                             attempt_id: str | None = None) -> None:
+        statement = models.upload_reservations.update().where(
+            models.upload_reservations.c.operation_id == operation_id,
+            models.upload_reservations.c.state != "committed")
+        if attempt_id is not None:
+            statement = statement.where(
+                models.upload_reservations.c.attempt_id == attempt_id)
+        connection.execute(statement.values(state="cleanup_pending"))
+
+    def release_reservation(self, connection, operation_id: str,
+                            attempt_id: str | None = None) -> None:
+        """Release quota for attempts that never uploaded an object.
+        Uploaded/unknown attempts stay reserved until the object is verified
+        deleted by cleanup (contracts.md section 9)."""
+        statement = select(models.upload_reservations).where(
+            models.upload_reservations.c.operation_id == operation_id)
+        if attempt_id is not None:
+            statement = statement.where(
+                models.upload_reservations.c.attempt_id == attempt_id)
+        for reservation in connection.execute(statement).mappings().all():
+            if reservation["state"] == "uploaded":
+                continue  # object may exist; only cleanup may release it
+            self._release_quota(connection, reservation)
+            connection.execute(models.upload_reservations.delete().where(
+                models.upload_reservations.c.operation_id == reservation["operation_id"],
+                models.upload_reservations.c.attempt_id == reservation["attempt_id"]))
+
+    def _release_quota(self, connection, reservation) -> None:
+        for scope, owner in (("owner", reservation["owner_id"]), ("global", "*")):
             connection.execute(models.quota_usage.update().where(
                 models.quota_usage.c.scope == scope,
                 models.quota_usage.c.owner_id == owner).values(
-                reserved_bytes=models.quota_usage.c.reserved_bytes + byte_size,
-                reserved_count=models.quota_usage.c.reserved_count + count_delta))
-        return operation_id, attempt
+                reserved_bytes=models.quota_usage.c.reserved_bytes - reservation["reserved_bytes"],
+                reserved_count=models.quota_usage.c.reserved_count - reservation["reserved_count"]))
+
+    def convert_reservation(self, connection, operation_id: str, attempt_id: str) -> None:
+        reservation = self.reservation(connection, operation_id, attempt_id)
+        if reservation is None:
+            raise ApiError(409, "operation_lease_lost", "Reservation is missing")
+        connection.execute(models.upload_reservations.update().where(
+            models.upload_reservations.c.operation_id == operation_id,
+            models.upload_reservations.c.attempt_id == attempt_id).values(
+            state="committed"))
+        count_delta = 1 if reservation["reserved_count"] else 0
+        for scope, owner in (("owner", reservation["owner_id"]), ("global", "*")):
+            connection.execute(models.quota_usage.update().where(
+                models.quota_usage.c.scope == scope,
+                models.quota_usage.c.owner_id == owner).values(
+                used_bytes=models.quota_usage.c.used_bytes + reservation["reserved_bytes"],
+                reserved_bytes=models.quota_usage.c.reserved_bytes - reservation["reserved_bytes"],
+                dashboard_count=models.quota_usage.c.dashboard_count + count_delta,
+                reserved_count=models.quota_usage.c.reserved_count - count_delta))
+
+    def cleanup_ready_reservations(self, store) -> int:
+        """Operator path: delete objects of non-committed attempts, then
+        release their quota and drop the rows. Committed objects are never
+        touched."""
+        cleaned = 0
+        with self.database.read_only() as connection:
+            rows = connection.execute(
+                select(models.upload_reservations).where(
+                    models.upload_reservations.c.state.in_(
+                        ("cleanup_pending", "uploaded")),
+                    models.upload_reservations.c.storage_key.is_not(None))
+            ).mappings().all()
+        for row in rows:
+            from .storage import ObjectRef
+            ref = ObjectRef(bucket=row["storage_bucket"], key=row["storage_key"],
+                            object_version_id=row["object_version_id"])
+            deleted = store.delete_orphan(ref)
+            if not deleted:
+                continue  # retry next pass; never release unverified storage
+            with self.database.transaction() as connection:
+                with self.database.guard(connection, exclusive=False):
+                    fresh = connection.execute(
+                        select(models.upload_reservations).where(
+                            models.upload_reservations.c.operation_id == row["operation_id"],
+                            models.upload_reservations.c.attempt_id == row["attempt_id"])
+                    ).mappings().one_or_none()
+                    if fresh is None or fresh["state"] == "committed":
+                        continue
+                    self._release_quota(connection, fresh)
+                    connection.execute(models.upload_reservations.delete().where(
+                        models.upload_reservations.c.operation_id == fresh["operation_id"],
+                        models.upload_reservations.c.attempt_id == fresh["attempt_id"]))
+                    cleaned += 1
+        return cleaned
 
     def _fail_interrupted(self, connection, row) -> None:
         connection.execute(models.operations.update().where(
@@ -203,41 +315,6 @@ class Operations:
                    "retryable": True, "trace_id": row["id"]},
             updated_at=to_db(now())))
         self.release_reservation(connection, row["id"])
-
-    def release_reservation(self, connection, operation_id: str) -> None:
-        reservation = connection.execute(
-            select(models.upload_reservations.c).where(
-                models.upload_reservations.c.operation_id == operation_id)
-        ).mappings().one_or_none()
-        if reservation is None:
-            return
-        connection.execute(models.upload_reservations.delete().where(
-            models.upload_reservations.c.operation_id == operation_id))
-        for scope, owner in (("owner", reservation["owner_id"]), ("global", "*")):
-            connection.execute(models.quota_usage.update().where(
-                models.quota_usage.c.scope == scope,
-                models.quota_usage.c.owner_id == owner).values(
-                reserved_bytes=models.quota_usage.c.reserved_bytes - reservation["reserved_bytes"],
-                reserved_count=models.quota_usage.c.reserved_count - reservation["reserved_count"]))
-
-    def convert_reservation(self, connection, operation_id: str, owner_id: str,
-                            *, byte_size: int, dashboard_added: bool) -> None:
-        reservation = connection.execute(
-            select(models.upload_reservations.c).where(
-                models.upload_reservations.c.operation_id == operation_id)
-        ).mappings().one()
-        connection.execute(models.upload_reservations.delete().where(
-            models.upload_reservations.c.operation_id == operation_id))
-        count_delta = 1 if dashboard_added else 0
-        for scope, owner in (("owner", owner_id), ("global", "*")):
-            connection.execute(models.quota_usage.update().where(
-                models.quota_usage.c.scope == scope,
-                models.quota_usage.c.owner_id == owner).values(
-                used_bytes=models.quota_usage.c.used_bytes + byte_size,
-                reserved_bytes=models.quota_usage.c.reserved_bytes - byte_size,
-                dashboard_count=models.quota_usage.c.dashboard_count + count_delta,
-                reserved_count=models.quota_usage.c.reserved_count
-                - (1 if dashboard_added else 0)))
 
     def claim_for_commit(self, connection, operation_id: str, attempt_id: str) -> None:
         """Final transaction gate: this attempt must still own the lease.
@@ -272,9 +349,9 @@ class Operations:
 
     def recover_stale_operations(self) -> int:
         """Lease-expired accepted/processing rows become retryable failures;
-        their quota reservations are released. A result committed by the
-        original worker stays succeeded (the update targets only
-        non-terminal states)."""
+        attempts that never uploaded release quota, uploaded ones wait for
+        object cleanup. A result committed by the original worker stays
+        succeeded (the update targets only non-terminal states)."""
         recovered = 0
         with self.database.transaction() as connection:
             with self.database.guard(connection, exclusive=True):

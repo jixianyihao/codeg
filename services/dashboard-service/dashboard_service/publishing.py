@@ -70,7 +70,13 @@ class Publisher:
                 *, dashboard_id: str | None, metadata: dict, html_stream,
                 trace_id: str = "local") -> PublishOutcome:
         """`reverify` re-runs the full authentication for the presented
-        credential (outside any transaction) after the upload finishes."""
+        credential (outside any transaction) after the upload finishes.
+
+        Stage 1 occupies the idempotency key and fixes the S3 object
+        coordinates; stage 2 streams, validates and puts the verified
+        object; stage 3 is the MySQL commit that references it. An object
+        written without a committed reference is an orphan the operator
+        cleanup removes (contracts.md section 9)."""
         method = "POST"
         path = (f"/api/v1/dashboards/{dashboard_id}/versions" if dashboard_id
                 else "/api/v1/dashboards")
@@ -85,12 +91,19 @@ class Publisher:
         staged = self._stage_one(actor, key, method, path, dashboard_id, payload, byte_size)
         if isinstance(staged, PublishOutcome):
             return staged
-        operation_id, attempt_id = staged
+        operation_id, attempt_id = staged["operation_id"], staged["attempt_id"]
+        uploaded = False
         try:
             staged_path = self.store.stage_stream(attempt_id, html_stream, content_sha, byte_size)
-            storage_key = new_id()
-            self.store.finalize(storage_key, staged_path)
+            object_ref = self.store.put_verified(staged["object_key"],
+                                                 staged_path.read_bytes(), content_sha, byte_size)
+            staged_path.unlink(missing_ok=True)
+            uploaded = True
+            with self.database.transaction() as connection:
+                self.operations.mark_uploaded(connection, operation_id, attempt_id,
+                                              object_ref.object_version_id)
         except ApiError as error:
+            self._settle_failed_attempt(operation_id, attempt_id, uploaded)
             self._record_failure(operation_id, error)
             raise
 
@@ -103,13 +116,13 @@ class Publisher:
         last_error: Exception | None = None
         for _ in range(CONTENT_LOCK_RETRIES):
             try:
-                return self._stage_three(fresh, operation_id, attempt_id, dashboard_id, title,
-                                         description, storage_key, content_sha, byte_size,
-                                         expected_revision, trace_id, key)
+                return self._stage_three(fresh, staged, title, description,
+                                         content_sha, byte_size, expected_revision,
+                                         trace_id, key)
             except ApiError as error:
                 # The final commit legitimately failed (revocation, revision
-                # conflict, ...): record the terminal failure and release the
-                # reservation instead of waiting for lease recovery.
+                # conflict, ...): settle the attempt and record the failure.
+                self._settle_failed_attempt(operation_id, attempt_id, uploaded)
                 self._record_failure(operation_id, error)
                 raise
             except OperationalError as error:
@@ -117,8 +130,22 @@ class Publisher:
                 continue
         contention = ApiError(503, "database_unavailable",
                               "Database contention; retry with the same key", retryable=True)
+        self._settle_failed_attempt(operation_id, attempt_id, uploaded)
         self._record_failure(operation_id, contention)
         raise last_error  # type: ignore[misc]
+
+    def _settle_failed_attempt(self, operation_id: str, attempt_id: str,
+                               uploaded: bool) -> None:
+        """After a failure: uploaded/unknown objects stay reserved and wait
+        for exact cleanup; nothing-uploaded attempts release quota now."""
+        try:
+            with self.database.transaction() as connection:
+                if uploaded:
+                    self.operations.mark_cleanup_pending(connection, operation_id, attempt_id)
+                else:
+                    self.operations.release_reservation(connection, operation_id, attempt_id)
+        except Exception:  # noqa: BLE001 - settlement must not mask the real error
+            pass
 
     # --------------------------------------------------------------- stages
 
@@ -146,7 +173,8 @@ class Publisher:
                             target_id=dashboard_id, payload=payload,
                             new_dashboard=dashboard_id is None, byte_size=byte_size,
                             quota_owner_id=quota_owner_id)
-                        if isinstance(begun, dict):
+                        if "attempt_id" not in begun:
+                            # A finished/pending wrapper, not a staged attempt.
                             if begun.get("state") == "succeeded":
                                 return PublishOutcome(begun, 200)  # recorded replay
                             return PublishOutcome(begun, 202, retry_after=2)
@@ -156,22 +184,31 @@ class Publisher:
         raise ApiError(503, "database_unavailable",
                        "Database contention; retry with the same key", retryable=True)
 
-    def _stage_three(self, actor: AuthContext, operation_id: str, attempt_id: str,
-                     dashboard_id: str | None, title, description, storage_key: str,
+    def _stage_three(self, actor: AuthContext, staged: dict, title, description,
                      content_sha: str, byte_size: int, expected_revision, trace_id: str,
                      key: str) -> PublishOutcome:
+        operation_id = staged["operation_id"]
+        attempt_id = staged["attempt_id"]
+        dashboard_id = staged["dashboard_id"]
+        version_id = staged["version_id"]
         with self.database.transaction() as connection:
             with self.database.guard(connection, exclusive=False):
                 # This attempt must still own the lease before anything else.
                 self.operations.claim_for_commit(connection, operation_id, attempt_id)
+                reservation = self.operations.reservation(connection, operation_id, attempt_id)
                 moment = now()
                 moment_db = to_db(moment)
-                if dashboard_id is None:
-                    dashboard_row = None
-                else:
-                    dashboard_row = self.authorizer.dashboard(connection, dashboard_id)
-                    # Upload-period revocation is caught here: authorize()
-                    # re-reads the live account state and the current ACL.
+                if dashboard_id != staged["dashboard_id"]:
+                    dashboard_id = staged["dashboard_id"]
+                if reservation is None:
+                    raise ApiError(409, "operation_lease_lost", "Reservation is missing")
+                if dashboard_id not in ("", None) and dashboard_id != reservation["dashboard_id"]:
+                    dashboard_id = reservation["dashboard_id"]
+                dashboard_row = self.authorizer.dashboard_or_none(
+                    connection, reservation["dashboard_id"])
+                if dashboard_row is not None:
+                    # Update path: the dashboard exists; re-authorize with the
+                    # current ACL (upload-period revocation is caught here).
                     self.authorizer.authorize(connection, dashboard_row, actor, "write",
                                               moment=moment)
                     require(dashboard_row["status"] == "published", 409, "invalid_input",
@@ -179,64 +216,62 @@ class Publisher:
                     require(dashboard_row["revision"] == expected_revision, 409,
                             "revision_conflict", "Dashboard changed; read it again")
                     title = title if title is not None else dashboard_row["title"]
-                owner_id = (actor.principal_id if dashboard_row is None
-                            else dashboard_row["owner_principal_id"])
-                effective_dashboard_id = dashboard_row["id"] if dashboard_row is not None else ""
-                existing_versions = quotas.count_dashboard_versions(
-                    connection, effective_dashboard_id)
-                if dashboard_row is not None:
+                    existing_versions = quotas.count_dashboard_versions(
+                        connection, dashboard_row["id"])
                     require(existing_versions < self.config.max_versions_per_dashboard, 507,
                             "quota_exceeded", "Version history limit reached for this dashboard")
-                number = existing_versions + 1
-                version_id = new_id()
-                if dashboard_row is None:
-                    # Circular FK (dashboard ⇄ version): the dashboard row is
-                    # created with a null pointer, the version is added, then
-                    # the pointer is filled — all inside this transaction.
-                    dashboard_id = new_id()
+                    revision = dashboard_row["revision"] + 1
+                    number = existing_versions + 1
+                    connection.execute(models.dashboard_versions.insert().values(
+                        id=version_id, dashboard_id=dashboard_row["id"], number=number,
+                        storage_bucket=reservation["storage_bucket"],
+                        storage_key=reservation["storage_key"],
+                        object_version_id=reservation["object_version_id"],
+                        sha256=content_sha, byte_size=byte_size,
+                        created_by=actor.principal_id, created_at=moment_db))
+                    connection.execute(models.dashboards.update().where(
+                        models.dashboards.c.id == dashboard_row["id"]).values(
+                        title=title, description=description,
+                        current_version_id=version_id, revision=revision,
+                        updated_at=moment_db, published_at=moment_db))
+                    effective_id = dashboard_row["id"]
+                else:
+                    # Create path: no dashboard row exists for these fixed ids.
                     connection.execute(models.dashboards.insert().values(
-                        id=dashboard_id, owner_principal_id=owner_id, title=title,
-                        description=description, current_version_id=None,
+                        id=dashboard_id, owner_principal_id=actor.principal_id,
+                        title=title, description=description, current_version_id=None,
                         revision=1, status="published", created_at=moment_db,
                         updated_at=moment_db, published_at=moment_db))
                     connection.execute(models.dashboard_versions.insert().values(
-                        id=version_id, dashboard_id=dashboard_id, number=number,
-                        storage_key=storage_key, sha256=content_sha, byte_size=byte_size,
+                        id=version_id, dashboard_id=dashboard_id, number=1,
+                        storage_bucket=reservation["storage_bucket"],
+                        storage_key=reservation["storage_key"],
+                        object_version_id=reservation["object_version_id"],
+                        sha256=content_sha, byte_size=byte_size,
                         created_by=actor.principal_id, created_at=moment_db))
                     connection.execute(models.dashboards.update().where(
                         models.dashboards.c.id == dashboard_id).values(
                         current_version_id=version_id))
                     revision = 1
-                else:
-                    connection.execute(models.dashboard_versions.insert().values(
-                        id=version_id, dashboard_id=dashboard_id, number=number,
-                        storage_key=storage_key, sha256=content_sha, byte_size=byte_size,
-                        created_by=actor.principal_id, created_at=moment_db))
-                    revision = dashboard_row["revision"] + 1
-                    connection.execute(models.dashboards.update().where(
-                        models.dashboards.c.id == dashboard_id).values(
-                        title=title, description=description,
-                        current_version_id=version_id, revision=revision,
-                        updated_at=moment_db, published_at=moment_db))
-                self.operations.convert_reservation(connection, operation_id, owner_id,
-                                                    byte_size=byte_size,
-                                                    dashboard_added=dashboard_row is None)
+                    number = 1
+                    effective_id = dashboard_id
+                self.operations.convert_reservation(connection, operation_id, attempt_id)
                 record_audit(connection, actor=actor, action="publish_version",
-                             target_type="dashboard", target_id=dashboard_id,
+                             target_type="dashboard", target_id=effective_id,
                              after={"version_id": version_id, "number": number,
                                     "sha256": content_sha, "byte_size": byte_size},
                              trace_id=trace_id, operation_id=operation_id)
                 result = {
-                    "dashboard_id": dashboard_id,
+                    "dashboard_id": effective_id,
                     "version_id": version_id,
                     "version_number": number,
                     "revision": revision,
                     "sha256": content_sha,
-                    "view_url": f"{self.config.control_origin}/dashboards/{dashboard_id}",
+                    "view_url": f"{self.config.control_origin}/dashboards/{effective_id}",
                 }
                 connection.execute(models.operations.update().where(
                     models.operations.c.id == operation_id).values(
-                    target_id=dashboard_id, state="succeeded", lease_until=None,
+                    target_id=effective_id, state="succeeded", lease_until=None,
                     result=result, error=None, updated_at=moment_db))
                 wrapper = self.operations.wrap(operation_id, key, "succeeded", result, None)
                 return PublishOutcome(wrapper, 201)

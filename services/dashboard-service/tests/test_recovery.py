@@ -37,35 +37,40 @@ def _operation_row(bundle, operation_id):
 
 
 def test_interrupted_operation_fails_and_resumes(bundle, make_service_account):
-    """Stage 3 never runs (simulated crash after the file hit disk): the
-    recovery pass marks the operation retryable-failed without committing a
-    version; an explicit same-key retry then succeeds exactly once."""
+    """S3 object written, final transaction never runs: recovery marks the
+    operation retryable-failed without committing a version; an explicit
+    same-key retry succeeds with a NEW attempt (new object key), and the
+    abandoned object is removed by exact cleanup."""
+    import io
     _, token = make_service_account("rec-interrupt")
     ctx = _ctx(bundle, token)
     html = b"<html>recover</html>"
     key = str(uuid.uuid4())
 
-    # Stage 1: occupy.
-    staged = None
+    # Stage 1: occupy the operation and reservation.
     with bundle.database.transaction() as connection:
         with bundle.database.guard(connection, exclusive=False):
             begun = bundle.service.operations.begin_staged(
                 connection, ctx, key, action="publish", method="POST",
                 path="/api/v1/dashboards", target_id=None, payload=_metadata(html),
                 new_dashboard=True, byte_size=len(html))
-            assert isinstance(begun, tuple)
-            staged = begun
-    operation_id, attempt_id = staged
+            assert "operation_id" in begun
+    operation_id, attempt_id = begun["operation_id"], begun["attempt_id"]
 
-    # Stage 2: file lands durably (crash happens right after this).
-    import io
-    path = bundle.service.store.stage_stream(attempt_id, io.BytesIO(html),
-                                             _metadata(html)["content_sha256"], len(html))
-    bundle.service.store.finalize(str(uuid.uuid4()), path)
+    # Stage 2: object lands in S3 and is marked uploaded (crash after this).
+    staged_path = bundle.service.store.stage_stream(
+        attempt_id, io.BytesIO(html), _metadata(html)["content_sha256"], len(html))
+    object_ref = bundle.service.store.put_verified(
+        begun["object_key"], staged_path.read_bytes(),
+        _metadata(html)["content_sha256"], len(html))
+    with bundle.database.transaction() as connection:
+        bundle.service.operations.mark_uploaded(connection, operation_id, attempt_id,
+                                                object_ref.object_version_id)
 
-    # No final transaction: the version must not be committed.
+    # No final transaction: nothing committed.
     row = _operation_row(bundle, operation_id)
     assert row["state"] == "accepted"
+    assert bundle.service.store.object_exists(object_ref)
 
     # Recovery pass expires the lease by force and re-runs.
     with bundle.database.transaction() as connection:
@@ -78,13 +83,8 @@ def test_interrupted_operation_fails_and_resumes(bundle, make_service_account):
     assert row["state"] == "failed"
     assert row["error"]["code"] == "operation_interrupted"
     assert row["error"]["retryable"] is True
-    # The reservation was released.
-    with bundle.database.read_only() as connection:
-        reservations = connection.execute(
-            sqlalchemy.select(models.upload_reservations)).all()
-    assert reservations == []
 
-    # Same-key retry (fresh request bytes) succeeds.
+    # Same-key retry (fresh request bytes) succeeds with a new attempt.
     from dashboard_service.publishing import PublishOutcome
     outcome = bundle.service.publisher.publish(
         ctx, lambda: ctx, key, dashboard_id=None, metadata=_metadata(html),
@@ -93,6 +93,22 @@ def test_interrupted_operation_fails_and_resumes(bundle, make_service_account):
     assert outcome.status == 201
     rows = committed_version_rows(bundle, outcome.wrapper["result"]["dashboard_id"])
     assert [r[1] for r in rows] == [1]  # exactly one committed version
+
+    # The abandoned first attempt's object is still there (unique key) and
+    # exact cleanup removes it without touching the committed one.
+    assert bundle.service.store.object_exists(object_ref)
+    committed_key = None
+    with bundle.database.read_only() as connection:
+        committed_key = connection.execute(
+            sqlalchemy.select(models.dashboard_versions.c.storage_key).where(
+                models.dashboard_versions.c.dashboard_id ==
+                outcome.wrapper["result"]["dashboard_id"])).scalar_one()
+    removed = bundle.service.operations.cleanup_ready_reservations(bundle.service.store)
+    assert removed >= 1
+    assert not bundle.service.store.object_exists(object_ref)
+    assert bundle.service.store.object_exists(
+        __import__("dashboard_service.storage", fromlist=["ObjectRef"]).ObjectRef(
+            bucket=bundle.config.s3_bucket, key=committed_key))
 
 
 def test_old_attempt_cannot_commit_after_lease_takeover(bundle, make_service_account):
@@ -104,10 +120,11 @@ def test_old_attempt_cannot_commit_after_lease_takeover(bundle, make_service_acc
     key = str(uuid.uuid4())
     with bundle.database.transaction() as connection:
         with bundle.database.guard(connection, exclusive=False):
-            operation_id, attempt_id = bundle.service.operations.begin_staged(
+            begun = bundle.service.operations.begin_staged(
                 connection, ctx, key, action="publish", method="POST",
                 path="/api/v1/dashboards", target_id=None, payload=_metadata(html),
                 new_dashboard=True, byte_size=len(html))
+            operation_id, attempt_id = begun["operation_id"], begun["attempt_id"]
     # A new attempt takes over (same key retry after stale-lease recovery).
     with bundle.database.transaction() as connection:
         connection.execute(models.operations.update().where(
@@ -127,10 +144,11 @@ def test_result_purge_keeps_compact_record(bundle, make_service_account):
     key = str(uuid.uuid4())
     with bundle.database.transaction() as connection:
         with bundle.database.guard(connection, exclusive=False):
-            operation_id, _ = bundle.service.operations.begin_staged(
+            begun = bundle.service.operations.begin_staged(
                 connection, ctx, key, action="publish", method="POST",
                 path="/api/v1/dashboards", target_id=None, payload=_metadata(html),
                 new_dashboard=True, byte_size=len(html))
+            operation_id = begun["operation_id"]
             connection.execute(models.operations.update().where(
                 models.operations.c.id == operation_id).values(
                 state="succeeded", result={"x": 1},
@@ -148,30 +166,51 @@ def row_now():
     return now()
 
 
-def test_orphan_cleanup_removes_only_unreferenced_old_files(bundle, make_service_account,
-                                                             client):
+def test_cleanup_never_touches_committed_objects(bundle, make_service_account, client):
+    """Committed version objects survive cleanup; only never-committed
+    attempt objects (uploaded or cleanup-pending) are deleted exactly."""
     from .conftest import publish_html
+    from dashboard_service.storage import ObjectRef
     _, token = make_service_account("rec-orphan")
     created = publish_html(client, token, b"<html>keep</html>").json()["result"]
-    # Place an orphan file older than the grace window.
-    import os
-    orphan = bundle.service.store.root / f"{uuid.uuid4()}.html"
-    orphan.write_bytes(b"orphan")
-    old = bundle.service.store.root / f"{uuid.uuid4()}.html"
-    old.write_bytes(b"old-orphan")
-    stamp = os.stat(old).st_mtime - 86400 * 2
-    os.utime(old, (stamp, stamp))
+    with bundle.database.read_only() as connection:
+        committed = connection.execute(
+            sqlalchemy.select(models.dashboard_versions.c.storage_bucket,
+                              models.dashboard_versions.c.storage_key,
+                              models.dashboard_versions.c.sha256,
+                              models.dashboard_versions.c.byte_size).where(
+                models.dashboard_versions.c.id == created["version_id"])).mappings().one()
+    committed_ref = ObjectRef(bucket=committed["storage_bucket"], key=committed["storage_key"])
+    assert bundle.service.store.object_exists(committed_ref)
+
+    # An abandoned uploaded attempt for a second, never-committed publish.
+    ctx = _ctx(bundle, token)
+    html = b"<html>orphan</html>"
+    with bundle.database.transaction() as connection:
+        with bundle.database.guard(connection, exclusive=False):
+            begun = bundle.service.operations.begin_staged(
+                connection, ctx, str(uuid.uuid4()), action="publish", method="POST",
+                path="/api/v1/dashboards", target_id=None, payload=_metadata(html),
+                new_dashboard=True, byte_size=len(html))
+    staged_path = bundle.service.store.stage_stream(
+        begun["attempt_id"], __import__("io").BytesIO(html),
+        _metadata(html)["content_sha256"], len(html))
+    orphan_ref = bundle.service.store.put_verified(
+        begun["object_key"], staged_path.read_bytes(),
+        _metadata(html)["content_sha256"], len(html))
+    with bundle.database.transaction() as connection:
+        bundle.service.operations.mark_uploaded(
+            connection, begun["operation_id"], begun["attempt_id"],
+            orphan_ref.object_version_id)
+
     from dashboard_service.operator import Operator
     stats = Operator(bundle.config, bundle.database).cleanup_orphan_files()
-    assert stats["files_removed"] == 1
-    assert not old.exists()
-    assert orphan.exists()          # still inside the grace window
-    # The referenced version file survives.
-    with bundle.database.read_only() as connection:
-        version = connection.execute(
-            sqlalchemy.select(models.dashboard_versions).where(
-                models.dashboard_versions.c.id == created["version_id"])).mappings().one()
-    assert (bundle.service.store.root / f"{version['storage_key']}.html").exists()
+    assert stats["orphan_objects_removed"] >= 1
+    assert not bundle.service.store.object_exists(orphan_ref)
+    assert bundle.service.store.object_exists(committed_ref)  # committed survives
+    # The committed object still reads correctly after cleanup ran.
+    assert bundle.service.store.get_verified(
+        committed_ref, committed["sha256"], committed["byte_size"]) == b"<html>keep</html>"
 
 
 def test_duplicate_version_number_race_is_rejected_by_database(bundle, make_service_account):
@@ -183,7 +222,7 @@ def test_duplicate_version_number_race_is_rejected_by_database(bundle, make_serv
     key = str(uuid.uuid4())
     with bundle.database.transaction() as connection:
         with bundle.database.guard(connection, exclusive=False):
-            operation_id, _ = bundle.service.operations.begin_staged(
+            begun = bundle.service.operations.begin_staged(
                 connection, ctx, key, action="publish", method="POST",
                 path="/api/v1/dashboards", target_id=None, payload=_metadata(html),
                 new_dashboard=True, byte_size=len(html))

@@ -187,15 +187,14 @@ def create_control_app(config: Config | None = None, *, database: Database | Non
     @app.get("/health/ready")
     def ready():
         from sqlalchemy import text
-        checks = {"database": "ok", "storage": "ok", "human_auth":
+        checks = {"database": "ok", "human_auth":
                   "configured" if config.w3_verify_url else "disabled"}
         try:
             database.verify_schema()
         except RuntimeError as error:
             checks["database"] = f"degraded: {error}"
-        if not service.store.root.is_dir():
-            checks["storage"] = "degraded: content directory missing"
-        healthy = checks["database"] == "ok" and checks["storage"] == "ok"
+        checks.update(service.store.probe())
+        healthy = checks["database"] == "ok" and checks["s3"] == "ok"
         return JSONResponse({"status": "ok" if healthy else "degraded", "checks": checks,
                              "recovery_mode": config.recovery_mode},
                             status_code=200 if healthy else 503)

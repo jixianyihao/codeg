@@ -164,25 +164,36 @@ class Operator:
                 "results_purged": operations.purge_expired_results()}
 
     def cleanup_orphan_files(self, *, older_than_seconds: int = 86400) -> dict:
+        """Exact cleanup of never-committed attempt objects (DB-driven);
+        committed objects are never addressed. Also drops stale staging
+        buffers on the service host."""
         store = ContentStore(self.config)
-        store.prepare()
-        with self.database.read_only() as connection:
-            keys = {row[0] for row in connection.execute(
-                select(models.dashboard_versions.c.storage_key))}
-        return {"files_removed": store.cleanup_orphans(keys, older_than_seconds=older_than_seconds)}
+        operations = Operations(self.config, self.database)
+        recovered = operations.recover_stale_operations()
+        cleaned = operations.cleanup_ready_reservations(store)
+        staged = store.clear_staging(older_than_seconds=3600)
+        return {"orphan_objects_removed": cleaned,
+                "stale_operations_recovered": recovered,
+                "staging_files_removed": staged}
 
     def verify_storage(self) -> dict:
         store = ContentStore(self.config)
         with self.database.read_only() as connection:
             versions = connection.execute(
-                select(models.dashboard_versions.c.storage_key,
+                select(models.dashboard_versions.c.storage_bucket,
+                       models.dashboard_versions.c.storage_key,
+                       models.dashboard_versions.c.object_version_id,
                        models.dashboard_versions.c.sha256,
                        models.dashboard_versions.c.byte_size)).mappings().all()
+        from .storage import ObjectRef
         missing = []
         for version in versions:
             try:
-                store.read_version(version["storage_key"], version["sha256"],
-                                   version["byte_size"])
+                store.get_verified(
+                    ObjectRef(bucket=version["storage_bucket"],
+                              key=version["storage_key"],
+                              object_version_id=version["object_version_id"]),
+                    version["sha256"], version["byte_size"])
             except ApiError:
                 missing.append(version["storage_key"])
         return {"versions_checked": len(versions), "missing_or_corrupt": missing}

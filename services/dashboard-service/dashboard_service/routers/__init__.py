@@ -37,7 +37,6 @@ def build_service(config: Config, database: Database, authenticator: Authenticat
     authorizer = Authorizer(database)
     operations = Operations(config, database)
     store = ContentStore(config)
-    store.prepare()
     return Service(
         config=config, database=database, authenticator=authenticator,
         authorizer=authorizer, operations=operations, store=store,

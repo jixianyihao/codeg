@@ -34,8 +34,7 @@ def test_publish_creates_private_dashboard(client, bundle, make_service_account)
         version = connection.execute(
             sqlalchemy.select(models.dashboard_versions).where(
                 models.dashboard_versions.c.id == result["version_id"])).mappings().one()
-    stored = bundle.service.store.read_version(version["storage_key"], version["sha256"],
-                                                version["byte_size"])
+    stored = bundle.service.store.read_version(version)
     assert stored == b"<html>v1</html>"
 
 
