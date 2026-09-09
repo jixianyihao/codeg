@@ -14,12 +14,7 @@
     all_authenticated: "企业内公开",
   }
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
-  let dashboard,
-    capabilities,
-    me,
-    selectedPrincipal,
-    versionCursor,
-    confirmAction
+  let dashboard, me, selectedPrincipal, versionCursor, confirmAction
   let generation = 0,
     writing = false,
     pendingWrite = null
@@ -346,12 +341,14 @@
         source.subject_type === "owner"
           ? "看板所有者"
           : `${types[source.subject_type] || source.subject_type} · ${source.role}` +
-            (source.expires_at ? ` · 至 ${formatDate(source.expires_at)}` : " · 长期")
+            (source.expires_at
+              ? ` · 至 ${formatDate(source.expires_at)}`
+              : " · 长期")
       holder.append(element("li", label))
     }
     const note = element(
       "li",
-      "历史版本与当前版本共用以上权限；撤销其中一条不一定完全失去访问。",
+      "历史版本与当前版本共用以上权限；撤销其中一条不一定完全失去访问。"
     )
     note.className = "help"
     holder.append(note)
@@ -379,7 +376,6 @@
           code: "INVALID_SERVICE",
         })
       me = identity
-      capabilities = supported
       $("identity").textContent = identity.display_name
       const nextDashboard = await api(base)
       if (current !== generation) return
@@ -402,12 +398,19 @@
       notice(errorMessage(error), true)
     }
   }
-  async function mutate(path, method, payload, success, retry = false, dialogId = null) {
+  async function mutate(
+    path,
+    method,
+    payload,
+    success,
+    retry = false,
+    dialogId = null
+  ) {
     if (writing) return
     if (pendingWrite && !retry) {
       notice(
         "上一次写操作的结果尚未确定。请先重试原操作，避免重复或覆盖修改。",
-        true,
+        true
       )
       $("recovery").hidden = false
       $("retry-write").hidden = false
@@ -572,7 +575,7 @@
       { title, description: $("metadata-description").value.trim() },
       "看板信息已更新，内容版本保持不变。",
       false,
-      "metadata-dialog",
+      "metadata-dialog"
     )
   })
   $("archive").addEventListener("click", () => {

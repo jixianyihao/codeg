@@ -6,7 +6,7 @@
   const $ = (id) => document.getElementById(id)
   const title = document.querySelector(".view-title")
   const pathMatch = location.pathname.match(
-    /^\/dashboards\/([0-9a-f-]{36})(?:\/view)?\/?$/i,
+    /^\/dashboards\/([0-9a-f-]{36})(?:\/view)?\/?$/i
   )
   const dashboardId = pathMatch?.[1]
   const status = $("view-status")
@@ -18,7 +18,9 @@
     status.setAttribute("role", "alert")
     title.textContent = message
     document.querySelectorAll("[data-auth]").forEach((node) => {
-      node.hidden = !(window.dashboardAuth && typeof window.dashboardAuth.login === "function")
+      node.hidden = !(
+        window.dashboardAuth && typeof window.dashboardAuth.login === "function"
+      )
     })
     retryButton.hidden = true
     manageLink.hidden = true
@@ -120,7 +122,12 @@
     try {
       const params = new URLSearchParams(location.search)
       const versionId = params.get("version")
-      if (versionId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(versionId)) {
+      if (
+        versionId &&
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          versionId
+        )
+      ) {
         fail("地址不正确。", false)
         return
       }

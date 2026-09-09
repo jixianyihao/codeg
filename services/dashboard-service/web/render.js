@@ -6,15 +6,17 @@
   history.replaceState(null, "", location.pathname)
   const status = document.getElementById("render-status")
   const controlOrigin = document.querySelector(
-    'meta[name="x-dashboard-control-origin"]',
+    'meta[name="x-dashboard-control-origin"]'
   )?.content
-  const dashboardId = document.querySelector('meta[name="x-dashboard-id"]')?.content
+  const dashboardId = document.querySelector(
+    'meta[name="x-dashboard-id"]'
+  )?.content
   function fail() {
     capability = ""
     status.setAttribute("role", "alert")
     status.replaceChildren(
       "内容无法加载，访问权限可能已失效或已过期。",
-      document.createElement("br"),
+      document.createElement("br")
     )
     if (controlOrigin && dashboardId) {
       const back = document.createElement("a")

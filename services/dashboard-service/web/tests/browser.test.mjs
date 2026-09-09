@@ -151,9 +151,10 @@ before(async () => {
     })
     const viewMatch = url.pathname.match(/^\/view\/([0-9a-f-]{36})\/?$/i)
     if (viewMatch) return loaderPage(res, viewMatch[1])
-    if (url.pathname === "/render") return asset(res, "render.html", {
-      "Content-Security-Policy": BOOTSTRAP_CSP,
-    })
+    if (url.pathname === "/render")
+      return asset(res, "render.html", {
+        "Content-Security-Policy": BOOTSTRAP_CSP,
+      })
     if (url.pathname === "/render.js") return asset(res, "render.js")
     if (url.pathname === "/content") {
       if (denied || req.headers.authorization !== "Bearer test-capability")
@@ -180,10 +181,14 @@ before(async () => {
     // Real route split: /dashboards/{id}[/view] is the launcher, /manage is
     // the admin page; both carry the shipped control CSP.
     if (/^\/dashboards\/[0-9a-f-]{36}\/manage\/?$/i.test(url.pathname))
-      return asset(res, "index.html", { "Content-Security-Policy": CONTROL_CSP })
+      return asset(res, "index.html", {
+        "Content-Security-Policy": CONTROL_CSP,
+      })
     if (/^\/dashboards\/[0-9a-f-]{36}(\/view)?\/?$/i.test(url.pathname))
       return asset(res, "view.html", { "Content-Security-Policy": CONTROL_CSP })
-    if (["/app.js", "/styles.css", "/view.js", "/view.css"].includes(url.pathname))
+    if (
+      ["/app.js", "/styles.css", "/view.js", "/view.css"].includes(url.pathname)
+    )
       return asset(res, url.pathname.slice(1))
     let body = ""
     for await (const chunk of req) body += chunk
@@ -212,7 +217,11 @@ before(async () => {
         auth_methods: ["w3"],
         content_origin: contentOrigin,
       })
-    if (url.pathname === `/api/v1/dashboards/${id}` && req.method === "PATCH" && patchConflict)
+    if (
+      url.pathname === `/api/v1/dashboards/${id}` &&
+      req.method === "PATCH" &&
+      patchConflict
+    )
       return json(res, { code: "REVISION_CONFLICT" }, 409)
     if (url.pathname === `/api/v1/dashboards/${id}`)
       return json(res, {
@@ -379,17 +388,14 @@ test("launcher forwards the same tab to the content loader: single layer, no con
   // Exactly one capability was minted and redeemed; nothing loaded the
   // control origin's pages into a frame (there is no frame on either side
   // except the single sandboxed content iframe).
-  const minted = recorded.filter(
-    (request) => request.path.endsWith("/view-capabilities")
+  const minted = recorded.filter((request) =>
+    request.path.endsWith("/view-capabilities")
   )
   assert.equal(minted.length, 1)
   const fetched = recorded.filter((request) => request.path === "/content")
   assert.equal(fetched.length, 1)
   assert.equal(fetched[0].authorization, "Bearer test-capability")
-  assert.equal(
-    (await evaluate("document.querySelectorAll('iframe').length")),
-    1
-  )
+  assert.equal(await evaluate("document.querySelectorAll('iframe').length"), 1)
 })
 
 test("viewer receives literal metadata and cannot use edit, sharing, or archive controls", async () => {
@@ -420,13 +426,23 @@ test("viewer receives literal metadata and cannot use edit, sharing, or archive 
   assert.equal(await evaluate("document.querySelectorAll('iframe').length"), 0)
 })
 
-test('metadata conflict is visible inside the editing dialog and preserves the draft', async () => {
-  role = 'owner'; patchConflict = true
-  await call('Page.navigate', { url: `${origin}/dashboards/${id}/manage` })
-  await until('document.querySelector("#edit-metadata") && !document.querySelector("#edit-metadata").hidden')
-  await evaluate('document.querySelector("#edit-metadata").click(); document.querySelector("#metadata-title").value="修订标题"; document.querySelector("#metadata-form").requestSubmit()')
-  await until('document.querySelector("#metadata-dialog[open] [role=alert]")?.textContent.includes("其他操作更新")')
-  assert.equal(await evaluate('document.querySelector("#metadata-title").value'), '修订标题')
+test("metadata conflict is visible inside the editing dialog and preserves the draft", async () => {
+  role = "owner"
+  patchConflict = true
+  await call("Page.navigate", { url: `${origin}/dashboards/${id}/manage` })
+  await until(
+    'document.querySelector("#edit-metadata") && !document.querySelector("#edit-metadata").hidden'
+  )
+  await evaluate(
+    'document.querySelector("#edit-metadata").click(); document.querySelector("#metadata-title").value="修订标题"; document.querySelector("#metadata-form").requestSubmit()'
+  )
+  await until(
+    'document.querySelector("#metadata-dialog[open] [role=alert]")?.textContent.includes("其他操作更新")'
+  )
+  assert.equal(
+    await evaluate('document.querySelector("#metadata-title").value'),
+    "修订标题"
+  )
   patchConflict = false
 })
 
@@ -452,15 +468,13 @@ test("sandbox renders interactive HTML but blocks parent access, external calls,
   // (no default 300x150, no double scrollbars).
   await until(
     '(() => { const r = document.querySelector("#dashboard-content").getBoundingClientRect();' +
-    'return r.width >= window.innerWidth - 2 && r.height >= window.innerHeight - 2 })()'
+      "return r.width >= window.innerWidth - 2 && r.height >= window.innerHeight - 2 })()"
   )
   await delay(250)
   // Click until the sandboxed inline handler reports back; retrying guards
   // against a click landing before the iframe finished layout on slow hosts.
   for (let attempt = 0; attempt < 20; attempt++) {
-    if (
-      await evaluate('window.testMessages.includes("interaction-complete")')
-    )
+    if (await evaluate('window.testMessages.includes("interaction-complete")'))
       break
     await call("Input.dispatchMouseEvent", {
       type: "mousePressed",

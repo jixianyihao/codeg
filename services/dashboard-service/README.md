@@ -66,7 +66,7 @@ location /dashboard-api/v1/ {
     proxy_set_header Authorization $http_authorization;  # 原样转发网页凭据
 }
 # boards.example.internal  → control:8080
-# board-content.example.net → content:8081（只放行 /render /render.js /content /health）
+# board-content.example.net → content:8081（只放行 /view/* /render /render.js /content /health）
 ```
 
 不把 S3 bucket 映射为静态站点；浏览器永远只访问内容进程。
