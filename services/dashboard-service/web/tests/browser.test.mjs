@@ -373,20 +373,29 @@ test("sandbox renders interactive HTML but blocks parent access, external calls,
     'document.querySelector("#dashboard-content")?.srcdoc.includes("increment")'
   )
   await delay(250)
-  await call("Input.dispatchMouseEvent", {
-    type: "mousePressed",
-    x: 50,
-    y: 40,
-    button: "left",
-    clickCount: 1,
-  })
-  await call("Input.dispatchMouseEvent", {
-    type: "mouseReleased",
-    x: 50,
-    y: 40,
-    button: "left",
-    clickCount: 1,
-  })
+  // Click until the sandboxed inline handler reports back; retrying guards
+  // against a click landing before the iframe finished layout on slow hosts.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    if (
+      await evaluate('window.testMessages.includes("interaction-complete")')
+    )
+      break
+    await call("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: 50,
+      y: 40,
+      button: "left",
+      clickCount: 1,
+    })
+    await call("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: 50,
+      y: 40,
+      button: "left",
+      clickCount: 1,
+    })
+    await delay(250)
+  }
   await until('window.testMessages.includes("interaction-complete")')
   assert.equal(
     await evaluate('window.testMessages.includes("embedded-image-loaded")'),

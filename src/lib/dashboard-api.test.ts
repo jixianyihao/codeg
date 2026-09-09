@@ -28,32 +28,34 @@ describe("dashboard metadata client", () => {
   })
 
   it("calls the public GET API through the same-origin proxy with the web credential", async () => {
-    fetchMock.mockImplementation((_input: RequestInfo | URL, init?: RequestInit) => {
-      const headers = new Headers(init?.headers)
-      expect(headers.get("Authorization")).toBe("Bearer user-a")
-      const url = String(_input)
-      if (url.endsWith("/me")) {
+    fetchMock.mockImplementation(
+      (_input: RequestInfo | URL, init?: RequestInit) => {
+        const headers = new Headers(init?.headers)
+        expect(headers.get("Authorization")).toBe("Bearer user-a")
+        const url = String(_input)
+        if (url.endsWith("/me")) {
+          return jsonResponse({
+            principal_id: "p-1",
+            principal_type: "human",
+            display_name: "A",
+          })
+        }
+        expect(url).toContain("/dashboards?scope=mine")
         return jsonResponse({
-          principal_id: "p-1",
-          principal_type: "human",
-          display_name: "A",
+          items: [
+            {
+              id: "board-1",
+              title: "Weekly",
+              description: "",
+              revision: 1,
+              status: "published",
+              role: "owner",
+            },
+          ],
+          next_cursor: null,
         })
       }
-      expect(url).toContain("/dashboards?scope=mine")
-      return jsonResponse({
-        items: [
-          {
-            id: "board-1",
-            title: "Weekly",
-            description: "",
-            revision: 1,
-            status: "published",
-            role: "owner",
-          },
-        ],
-        next_cursor: null,
-      })
-    })
+    )
     const page = await listDashboards({ scope: "mine" })
     expect(page.items.map((item) => item.id)).toEqual(["board-1"])
     expect(page.principal_id).toBe("p-1")
@@ -76,7 +78,13 @@ describe("dashboard metadata client", () => {
     fetchMock.mockImplementation((_input: RequestInfo | URL) => {
       const url = String(_input)
       if (url.endsWith("/me")) return jsonResponse({}, 401)
-      return jsonResponse({ items: [{ title: "no id" }, { id: "ok", title: "T", revision: 2, status: "published" }], next_cursor: null })
+      return jsonResponse({
+        items: [
+          { title: "no id" },
+          { id: "ok", title: "T", revision: 2, status: "published" },
+        ],
+        next_cursor: null,
+      })
     })
     await expect(listDashboards({ scope: "all" })).rejects.toThrow(
       "dashboard_unauthorized"

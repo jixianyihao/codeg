@@ -1,5 +1,9 @@
 import { getCodegToken } from "@/lib/transport/web-auth"
-import type { Dashboard, DashboardPage, DashboardQuery } from "./dashboard-types"
+import type {
+  Dashboard,
+  DashboardPage,
+  DashboardQuery,
+} from "./dashboard-types"
 
 // Same-origin reverse proxy route (deployment-configured):
 //   AresClaw /dashboard-api/v1/*  →  dashboard service /api/v1/*
@@ -23,7 +27,8 @@ async function apiFetch(path: string): Promise<unknown> {
   })
   if (token !== getCodegToken()) throw new Error("dashboard_identity_changed")
   if (response.status === 401) throw new Error("dashboard_unauthorized")
-  if (!response.ok) throw new Error(`dashboard_service_error_${response.status}`)
+  if (!response.ok)
+    throw new Error(`dashboard_service_error_${response.status}`)
   const body = await response.json()
   if (token !== getCodegToken()) throw new Error("dashboard_identity_changed")
   return body
@@ -50,7 +55,9 @@ export async function listDashboards(
   if (query.status) params.set("status", query.status)
   const [me, page] = await Promise.all([
     apiFetch("/me") as Promise<Record<string, unknown>>,
-    apiFetch(`/dashboards?${params.toString()}`) as Promise<Record<string, unknown>>,
+    apiFetch(`/dashboards?${params.toString()}`) as Promise<
+      Record<string, unknown>
+    >,
   ])
   const items = Array.isArray(page.items) ? page.items.filter(isDashboard) : []
   return {

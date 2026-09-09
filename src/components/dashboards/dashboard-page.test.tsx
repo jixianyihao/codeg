@@ -3,9 +3,13 @@ import { NextIntlClientProvider } from "next-intl"
 import { beforeEach, expect, it, vi } from "vitest"
 import { DashboardsPage } from "./dashboard-page"
 
-const state = vi.hoisted(() => ({ call: vi.fn() }))
-vi.mock("@/lib/transport", () => ({
-  getTransport: () => ({ call: state.call }),
+const state = vi.hoisted(() => ({ listDashboards: vi.fn() }))
+vi.mock("@/lib/dashboard-api", () => ({
+  listDashboards: state.listDashboards,
+  dashboardViewUrl: (origin: string, id: string) =>
+    origin === "https://boards.internal"
+      ? `https://boards.internal/dashboards/${id}`
+      : null,
 }))
 vi.mock("@/lib/platform", () => ({ isDesktop: () => false }))
 
@@ -68,12 +72,12 @@ function mount() {
   )
 }
 beforeEach(() => {
-  state.call.mockReset()
+  state.listDashboards.mockReset()
   localStorage.clear()
 })
 
 it("shows metadata cards with independent links and no HTML embeds", async () => {
-  state.call.mockResolvedValue(page)
+  state.listDashboards.mockResolvedValue(page)
   const { container } = mount()
   expect(await screen.findByText("发布周报 <img src=x>")).toBeInTheDocument()
   expect(screen.getByRole("link", { name: "打开看板" })).toHaveAttribute(
@@ -85,7 +89,7 @@ it("shows metadata cards with independent links and no HTML embeds", async () =>
 })
 
 it("shows service failure and allows a successful retry", async () => {
-  state.call
+  state.listDashboards
     .mockRejectedValueOnce(new Error("unavailable"))
     .mockResolvedValue(page)
   mount()
@@ -95,7 +99,7 @@ it("shows service failure and allows a successful retry", async () => {
 })
 
 it("distinguishes an empty successful listing", async () => {
-  state.call.mockResolvedValue({ ...page, items: [] })
+  state.listDashboards.mockResolvedValue({ ...page, items: [] })
   mount()
   expect(await screen.findByText("没有可见看板")).toBeInTheDocument()
   expect(screen.queryByRole("alert")).toBeNull()

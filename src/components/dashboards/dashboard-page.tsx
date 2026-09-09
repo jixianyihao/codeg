@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Search,
 } from "lucide-react"
+import { BrowserLink } from "@/components/ui/browser-link"
 import { Button } from "@/components/ui/button"
 import { WorkbenchPageTitle } from "@/components/workbench/workbench-page-title"
 import { dashboardViewUrl, listDashboards } from "@/lib/dashboard-api"
@@ -89,8 +90,11 @@ export function DashboardsPage() {
     window.addEventListener("storage", authChanged)
     window.addEventListener("aresclaw:auth-changed", authChanged)
     window.addEventListener("aresclaw:dashboards-changed", refresh)
+    const requestAtMount = request.current
     return () => {
-      ++request.current
+      // Mutable staleness counter, not a DOM node: safe to bump in cleanup.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      if (request.current === requestAtMount) ++request.current
       window.removeEventListener("focus", refresh)
       window.removeEventListener("storage", authChanged)
       window.removeEventListener("aresclaw:auth-changed", authChanged)
@@ -246,15 +250,13 @@ export function DashboardsPage() {
                 </dl>
                 {url ? (
                   <div className="flex items-center justify-between gap-2 border-t pt-3">
-                    <a
+                    <BrowserLink
                       className="inline-flex items-center gap-2 text-sm font-medium hover:underline"
                       href={url}
-                      target="_blank"
-                      rel="noopener noreferrer"
                     >
                       {t("open")}
                       <ExternalLink className="size-3.5" />
-                    </a>
+                    </BrowserLink>
                     <Button
                       variant="ghost"
                       size="icon"
