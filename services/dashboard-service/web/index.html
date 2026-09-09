@@ -64,21 +64,14 @@
         <div class="workspace">
           <section class="viewer-panel" aria-labelledby="viewer-heading">
             <div class="panel-heading">
-              <h2 id="viewer-heading">当前内容</h2>
-              <button id="fullscreen-view" class="quiet" type="button">
-                全屏查看
-              </button>
-              <button id="refresh-view" class="quiet" type="button">
-                重新加载内容
-              </button>
+              <h2 id="viewer-heading">内容查看</h2>
             </div>
             <p class="snapshot-note">
-              内容为发布时的静态快照，图表交互不会更新源数据。
+              管理页不嵌入看板内容：内容在新标签页的独立沙箱中打开，每次查看都按当前权限重新授权。
             </p>
-            <div id="viewer-status" class="empty-state" role="status">
-              正在准备查看器…
-            </div>
-            <div id="viewer"></div>
+            <button id="fullscreen-view" class="quiet" type="button">
+              在新标签页打开看板
+            </button>
           </section>
           <aside class="side-panels">
             <section class="panel" aria-labelledby="versions-heading">

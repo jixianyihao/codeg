@@ -36,7 +36,7 @@ def test_capability_flow_happy_path(client, content_client, human_board):
     issued = _issue(client, token, created["dashboard_id"])
     assert issued.status_code == 200
     body = issued.json()
-    assert body["render_url"].startswith("http://127.0.0.1:18081/render#")
+    assert body["render_url"].startswith(f"http://127.0.0.1:18081/view/{created['dashboard_id']}#")
     assert body["expires_at"]
 
     fragment = body["render_url"].split("#", 1)[1]
@@ -169,7 +169,7 @@ def test_render_pages_served_with_csp(content_client):
     render = content_client.get("/render")
     assert render.status_code == 200
     policy = render.headers.get("content-security-policy", "")
-    assert "frame-ancestors http://127.0.0.1:18080" in policy
+    assert "frame-ancestors 'none'" in policy  # nothing may embed the loader
     assert "script-src 'self' 'unsafe-inline'" in policy
     assert "worker-src 'none'" in policy
     script = content_client.get("/render.js")
@@ -183,3 +183,58 @@ def test_content_app_has_no_management_routes(content_client, human_board):
     for path in ("/api/v1/me", "/api/v1/dashboards", "/api/v1/capabilities"):
         response = content_client.get(path)
         assert response.status_code == 404
+
+
+# ------------------------------------------------- single-layer view flow
+
+def test_view_loader_route_and_csp(client, content_client, human_board):
+    """The content origin serves the single-layer trusted loader at
+    /view/{id} with the control coordinates injected for the back link; no
+    origin may embed it."""
+    token, created = human_board
+    dashboard_id = created["dashboard_id"]
+    issued = _issue(client, token, dashboard_id).json()
+    url = issued["render_url"]
+
+    loader = content_client.get(f"/view/{dashboard_id}")
+    assert loader.status_code == 200
+    policy = loader.headers.get("content-security-policy", "")
+    assert "frame-ancestors 'none'" in policy
+    assert "frame-src about:" in policy
+    assert loader.headers["cache-control"] == "no-store"
+    body = loader.text
+    assert f'<meta name="x-dashboard-id" content="{dashboard_id}">' in body
+    assert ('<meta name="x-dashboard-control-origin" '
+            'content="http://127.0.0.1:18080">') in body
+    # The capability never appears in the served page.
+    assert url.split("#", 1)[1] not in body
+
+    # Legacy /render stays a standalone single-layer entry (no nesting added).
+    legacy = content_client.get("/render")
+    assert legacy.status_code == 200
+    assert "x-dashboard-id" not in legacy.text
+
+    # Malformed ids are rejected, not guessed.
+    assert content_client.get("/view/not-a-uuid").status_code == 422
+
+
+def test_control_routes_serve_launcher_and_manage(client, human_board):
+    """/dashboards/{id} is the stable launcher; /manage serves the admin
+    page; the legacy /view serves the launcher too. Control pages embed
+    nothing: frame-src is absent (default-src 'none' denies frames)."""
+    _, created = human_board
+    dashboard_id = created["dashboard_id"]
+    for path in (f"/dashboards/{dashboard_id}",
+                 f"/dashboards/{dashboard_id}/view"):
+        page = client.get(path)
+        assert page.status_code == 200
+        policy = page.headers.get("content-security-policy", "")
+        assert "default-src 'none'" in policy
+        assert "style-src 'self'" in policy
+        assert "frame-src" not in policy  # no control-origin iframes at all
+        assert 'href="/view.css"' in page.text  # R12: external CSS, no inline
+
+    manage = client.get(f"/dashboards/{dashboard_id}/manage")
+    assert manage.status_code == 200
+    assert 'src="/app.js"' in manage.text
+    assert 'src="/view.js"' not in manage.text

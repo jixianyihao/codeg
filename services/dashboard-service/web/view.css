@@ -1,0 +1,71 @@
+/* Control-origin launcher (/dashboards/{id} and legacy /view): no iframes,
+   no inline styles — the control CSP allows only this stylesheet (R12). */
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: #fff;
+  font: 14px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #1f2733;
+}
+
+#view-status {
+  box-sizing: border-box;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px;
+  text-align: center;
+}
+
+.view-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.view-hint {
+  margin: 0;
+  color: #526073;
+}
+
+.view-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+#view-login,
+#view-retry {
+  border: 1px solid #c6d0e1;
+  background: #fff;
+  border-radius: 8px;
+  padding: 8px 22px;
+  font: inherit;
+  cursor: pointer;
+}
+
+#view-login:hover,
+#view-retry:hover {
+  border-color: #7a8ba8;
+}
+
+#view-manage {
+  color: #2b5cdd;
+  text-decoration: none;
+}
+
+#view-manage:hover {
+  text-decoration: underline;
+}
+
+#view-status[role="alert"] .view-title {
+  color: #a52b36;
+}
+
+[hidden] {
+  display: none !important;
+}

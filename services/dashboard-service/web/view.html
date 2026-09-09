@@ -5,50 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
     <title>看板内容</title>
-    <style>
-      html,
-      body {
-        height: 100%;
-        margin: 0;
-        background: #fff;
-        font: 14px system-ui, sans-serif;
-      }
-      iframe {
-        display: block;
-        width: 100%;
-        height: 100%;
-        border: 0;
-      }
-      #view-status {
-        box-sizing: border-box;
-        display: flex;
-        min-height: 100vh;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 14px;
-        color: #526073;
-      }
-      #view-status[role="alert"] {
-        color: #a52b36;
-      }
-      #view-login {
-        border: 1px solid #c6d0e1;
-        background: #fff;
-        border-radius: 8px;
-        padding: 8px 22px;
-        font-size: 14px;
-        cursor: pointer;
-      }
-      [hidden] {
-        display: none !important;
-      }
-    </style>
-  </head>
-  <body>
-    <div id="view-status" role="status">正在加载看板…</div>
-    <iframe id="view-frame" title="看板内容" referrerpolicy="no-referrer" hidden></iframe>
+    <link rel="stylesheet" href="/view.css" />
     <script src="/auth-provider.js" defer></script>
     <script src="/view.js" defer></script>
+  </head>
+  <body>
+    <main id="view-status" role="status">
+      <p class="view-title">正在安全加载看板…</p>
+      <p class="view-hint" data-auth hidden>
+        需要企业身份登录后才能查看。
+      </p>
+      <div class="view-actions">
+        <button id="view-login" type="button" data-auth hidden>
+          登录后查看
+        </button>
+        <a id="view-manage" rel="noopener" hidden>打开管理页</a>
+        <button id="view-retry" type="button" hidden>重试</button>
+      </div>
+    </main>
   </body>
 </html>

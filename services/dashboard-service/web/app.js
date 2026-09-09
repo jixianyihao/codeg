@@ -2,7 +2,7 @@
   "use strict"
   const $ = (id) => document.getElementById(id)
   const pathMatch = location.pathname.match(
-    /^\/dashboards\/([0-9a-f-]{36})\/?$/i
+    /^\/dashboards\/([0-9a-f-]{36})\/manage\/?$/i
   )
   const dashboardId = pathMatch?.[1]
   const base = `/dashboards/${encodeURIComponent(dashboardId || "")}`
@@ -21,7 +21,6 @@
     versionCursor,
     confirmAction
   let generation = 0,
-    viewGeneration = 0,
     writing = false,
     pendingWrite = null
   let searchGeneration = 0
@@ -174,58 +173,24 @@
       : ""
     $("archive").textContent =
       dashboard.status === "archived" ? "恢复发布" : "下架看板"
-    $("refresh-view").hidden = dashboard.status === "archived"
+    $("fullscreen-view").hidden = dashboard.status === "archived"
     configureRoles()
     $("loading").hidden = true
     $("dashboard").hidden = false
   }
-  async function showVersion(versionId) {
-    const current = ++viewGeneration
-    $("viewer").replaceChildren()
-    $("viewer-status").hidden = false
+  function showVersion(versionId) {
+    // The manage page embeds no viewer: viewing opens the stable control
+    // entry in a new tab, which re-authorizes and forwards to the
+    // content-origin loader. A historical version rides in ?version=.
     if (dashboard.status === "archived") {
-      $("viewer-status").textContent =
-        "看板已下架。恢复发布后，仍在有效期内的授权对象可再次访问。"
+      notice("看板已下架。恢复发布后，仍在有效期内的授权对象可再次访问。", true)
       return
     }
-    $("viewer-status").textContent = "正在准备查看器…"
-    try {
-      const result = await api(`${base}/view-capabilities`, {
-        method: "POST",
-        headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({ version_id: versionId }),
-      })
-      if (current !== viewGeneration) return
-      const url = new URL(result.render_url, location.origin)
-      const allowed = new URL(capabilities.content_origin)
-      if (
-        url.origin !== allowed.origin ||
-        url.origin === location.origin ||
-        url.pathname !== "/render" ||
-        !url.hash ||
-        url.search ||
-        url.username ||
-        url.password ||
-        !["https:", "http:"].includes(url.protocol)
-      ) {
-        throw Object.assign(new Error("invalid-render-url"), {
-          code: "INVALID_SERVICE",
-        })
-      }
-      const frame = element("iframe")
-      frame.title = "隔离看板查看器"
-      frame.referrerPolicy = "no-referrer"
-      frame.src = url.href
-      $("viewer").replaceChildren(frame)
-      $("viewer-heading").textContent =
-        versionId === dashboard.current_version_id
-          ? "当前内容"
-          : `历史版本 ${versions.get(versionId)?.number || ""}`
-      $("viewer-status").hidden = true
-    } catch (error) {
-      if (current === viewGeneration)
-        $("viewer-status").textContent = errorMessage(error)
-    }
+    const suffix =
+      versionId && versionId !== dashboard.current_version_id
+        ? `?version=${encodeURIComponent(versionId)}`
+        : ""
+    window.open(`${base}${suffix}`, "_blank", "noopener")
   }
   function confirm(title, description, action) {
     $("confirm-heading").textContent = title
@@ -394,8 +359,6 @@
 
   async function reload() {
     const current = ++generation
-    ++viewGeneration
-    $("viewer").replaceChildren()
     $("dashboard").hidden = true
     $("loading").hidden = false
     $("recovery").hidden = true
@@ -569,9 +532,6 @@
   $("retry-write").addEventListener("click", () =>
     mutate("", "", null, "", true)
   )
-  $("refresh-view").addEventListener("click", () =>
-    showVersion(dashboard.current_version_id)
-  )
   $("more-versions").addEventListener("click", () =>
     loadVersions(true).catch((error) => notice(errorMessage(error), true))
   )
@@ -631,22 +591,11 @@
         )
     )
   })
-  $("fullscreen-view").addEventListener("click", async () => {
-    // Open the pure render page on the content origin: full viewport,
-    // sandboxed generated HTML only — no management chrome.
+  $("fullscreen-view").addEventListener("click", () => {
+    // Open the stable control entry in a new tab: it re-authorizes with the
+    // visitor's identity and forwards to the content-origin loader.
     if (!dashboard || dashboard.status === "archived") return
-    notice("正在打开全屏视图…")
-    try {
-      const result = await api(`${base}/view-capabilities`, {
-        method: "POST",
-        headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({}),
-      })
-      window.open(result.render_url, "_blank", "noopener,noreferrer")
-      notice("已在新标签页打开全屏视图。")
-    } catch (error) {
-      notice(errorMessage(error), true)
-    }
+    window.open(base, "_blank", "noopener")
   })
 
   $("search-principals").addEventListener("click", searchPrincipals)

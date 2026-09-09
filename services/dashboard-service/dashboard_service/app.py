@@ -28,7 +28,7 @@ logger = logging.getLogger("dashboard_service")
 
 CONTROL_PAGE_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-    "connect-src 'self'; frame-src {content}; base-uri 'none'; form-action 'none'; "
+    "connect-src 'self'; base-uri 'none'; form-action 'none'; "
     "frame-ancestors 'none'"
 )
 
@@ -168,19 +168,27 @@ def create_control_app(config: Config | None = None, *, database: Database | Non
         app.include_router(module.router)
 
     web_dir = Path(__file__).resolve().parent.parent / "web"
-    page_policy = CONTROL_PAGE_CSP.format(content=config.content_origin)
+    page_policy = CONTROL_PAGE_CSP
 
     @app.get("/dashboards/{dashboard_id}", include_in_schema=False)
     def dashboard_page(dashboard_id: str):
+        """Stable share/bookmark entry: authenticate with the visitor's own
+        W3 identity, mint a short-lived capability, then location.replace to
+        the content-origin trusted loader — a single-layer view, no nested
+        iframes on the control origin (impl-handoff section 4)."""
+        return FileResponse(web_dir / "view.html", media_type="text/html",
+                            headers={"Content-Security-Policy": page_policy})
+
+    @app.get("/dashboards/{dashboard_id}/manage", include_in_schema=False)
+    def dashboard_manage(dashboard_id: str):
+        """Management surface: metadata, ACL, versions, rollback,
+        archive/restore. Deliberately embeds no viewer."""
         return FileResponse(web_dir / "index.html", media_type="text/html",
                             headers={"Content-Security-Policy": page_policy})
 
     @app.get("/dashboards/{dashboard_id}/view", include_in_schema=False)
     def dashboard_full_view(dashboard_id: str):
-        """Stable bookmarkable route: full-viewport render only. The visitor
-        authenticates with their own identity; a fresh short-lived capability
-        is minted per load, so the URL stays valid while ACL changes apply
-        immediately."""
+        """Legacy entry: navigates into the same single-layer flow."""
         return FileResponse(web_dir / "view.html", media_type="text/html",
                             headers={"Content-Security-Policy": page_policy})
 
@@ -190,7 +198,8 @@ def create_control_app(config: Config | None = None, *, database: Database | Non
                             headers={"X-Content-Type-Options": "nosniff",
                                      "Cache-Control": "no-store"})
 
-    for name, media in (("app.js", "text/javascript"), ("styles.css", "text/css")):
+    for name, media in (("app.js", "text/javascript"), ("styles.css", "text/css"),
+                        ("view.css", "text/css")):
         def static_file(name=name, media=media):
             # Admin-page assets are small and change with the service;
             # no-store prevents webviews from running stale login/view

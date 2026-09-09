@@ -1,8 +1,32 @@
 ;(async () => {
   "use strict"
+  // Trusted loader: the capability is read from the fragment and cleared
+  // immediately; the only credential kept lives in this closure's memory.
   let capability = location.hash.slice(1)
   history.replaceState(null, "", location.pathname)
   const status = document.getElementById("render-status")
+  const controlOrigin = document.querySelector(
+    'meta[name="x-dashboard-control-origin"]',
+  )?.content
+  const dashboardId = document.querySelector('meta[name="x-dashboard-id"]')?.content
+  function fail() {
+    capability = ""
+    status.setAttribute("role", "alert")
+    status.replaceChildren(
+      "内容无法加载，访问权限可能已失效或已过期。",
+      document.createElement("br"),
+    )
+    if (controlOrigin && dashboardId) {
+      const back = document.createElement("a")
+      back.href = `${controlOrigin}/dashboards/${dashboardId}`
+      back.textContent = "返回看板入口重新授权"
+      back.rel = "noopener"
+      status.append(back)
+    } else {
+      // No positional information: never guess a dashboard or permission.
+      status.append("请从看板链接重新进入。")
+    }
+  }
   try {
     if (
       !capability ||
@@ -40,9 +64,6 @@
     document.body.append(frame)
     status.hidden = true
   } catch {
-    capability = ""
-    status.setAttribute("role", "alert")
-    status.textContent =
-      "内容无法加载，访问权限可能已失效。请返回看板详情页重新加载。"
+    fail()
   }
 })()

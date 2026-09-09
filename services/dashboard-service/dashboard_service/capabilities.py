@@ -75,7 +75,10 @@ class CapabilityService:
                 session_version=1, dashboard_id=dashboard_id,
                 version_id=target_version_id, created_at=to_db(moment),
                 expires_at=to_db(expires)))
-        return {"render_url": f"{self.config.content_origin}/render#{token}",
+        # Stable single-layer flow: the capability rides in the fragment of
+        # the content-origin trusted loader /view/{id}; the loader is the
+        # only page that redeems it (contracts.md section 6).
+        return {"render_url": f"{self.config.content_origin}/view/{dashboard_id}#{token}",
                 "expires_at": expires.isoformat().replace("+00:00", "Z")}
 
     def resolve(self, token: str):

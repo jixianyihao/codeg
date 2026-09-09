@@ -34,6 +34,17 @@ let sequence = 0
 const waiting = new Map()
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+// Real response policies mirrored from dashboard_service.app/content_app so
+// the browser exercises the actual CSP the service ships (R12 verification).
+const CONTROL_CSP =
+  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+  "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+const BOOTSTRAP_CSP =
+  "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; " +
+  "img-src data: blob:; font-src data:; connect-src 'self'; frame-src about:; " +
+  "object-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'; " +
+  "frame-ancestors 'none'"
+
 function call(method, params = {}, sessionId) {
   const commandId = ++sequence
   return new Promise((resolve, reject) => {
@@ -79,7 +90,7 @@ async function json(res, value, status = 200) {
   res.end(JSON.stringify(value))
 }
 
-async function asset(res, name) {
+async function asset(res, name, extraHeaders = {}) {
   try {
     const bytes = await readFile(path.join(webRoot, name))
     const mime = name.endsWith(".html")
@@ -87,12 +98,35 @@ async function asset(res, name) {
       : name.endsWith(".css")
         ? "text/css"
         : "text/javascript"
-    res.writeHead(200, { "Content-Type": `${mime}; charset=utf-8` })
+    res.writeHead(200, {
+      "Content-Type": `${mime}; charset=utf-8`,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      ...extraHeaders,
+    })
     res.end(bytes)
   } catch {
     res.writeHead(404)
     res.end("Missing page asset")
   }
+}
+
+async function loaderPage(res, dashboardId) {
+  // Mirrors content_app._loader_response: inject the trusted coordinates of
+  // the back-to-control link, keep the capability out of the served bytes.
+  const raw = await readFile(path.join(webRoot, "render.html"), "utf8")
+  const marker =
+    `<meta name="x-dashboard-control-origin" content="${origin}">` +
+    `<meta name="x-dashboard-id" content="${dashboardId}">`
+  const page = raw.replace("</head>", marker + "</head>")
+  res.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": BOOTSTRAP_CSP,
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+  })
+  res.end(page)
 }
 
 async function start(handler) {
@@ -115,7 +149,11 @@ before(async () => {
       path: url.pathname,
       authorization: req.headers.authorization,
     })
-    if (url.pathname === "/render") return asset(res, "render.html")
+    const viewMatch = url.pathname.match(/^\/view\/([0-9a-f-]{36})\/?$/i)
+    if (viewMatch) return loaderPage(res, viewMatch[1])
+    if (url.pathname === "/render") return asset(res, "render.html", {
+      "Content-Security-Policy": BOOTSTRAP_CSP,
+    })
     if (url.pathname === "/render.js") return asset(res, "render.js")
     if (url.pathname === "/content") {
       if (denied || req.headers.authorization !== "Bearer test-capability")
@@ -139,8 +177,13 @@ before(async () => {
         'window.dashboardAuth = { getAccessToken: async () => "human-test-token" }'
       )
     }
-    if (url.pathname.startsWith("/dashboards/")) return asset(res, "index.html")
-    if (["/app.js", "/styles.css"].includes(url.pathname))
+    // Real route split: /dashboards/{id}[/view] is the launcher, /manage is
+    // the admin page; both carry the shipped control CSP.
+    if (/^\/dashboards\/[0-9a-f-]{36}\/manage\/?$/i.test(url.pathname))
+      return asset(res, "index.html", { "Content-Security-Policy": CONTROL_CSP })
+    if (/^\/dashboards\/[0-9a-f-]{36}(\/view)?\/?$/i.test(url.pathname))
+      return asset(res, "view.html", { "Content-Security-Policy": CONTROL_CSP })
+    if (["/app.js", "/styles.css", "/view.js", "/view.css"].includes(url.pathname))
       return asset(res, url.pathname.slice(1))
     let body = ""
     for await (const chunk of req) body += chunk
@@ -204,7 +247,8 @@ before(async () => {
       })
     if (url.pathname.endsWith("/view-capabilities"))
       return json(res, {
-        render_url: renderOverride || `${contentOrigin}/render#test-capability`,
+        render_url:
+          renderOverride || `${contentOrigin}/view/${id}#test-capability`,
         expires_at: new Date(Date.now() + 60000).toISOString(),
       })
     if (url.pathname.endsWith("/grants"))
@@ -318,12 +362,42 @@ after(async () => {
   }
 })
 
-test("viewer receives literal metadata and cannot use edit, sharing, or archive controls", async () => {
+test("launcher forwards the same tab to the content loader: single layer, no control iframe", async () => {
   role = "viewer"
   denied = false
   recorded = []
   html = '<!doctype html><h1 id="sample">已加载</h1>'
   await call("Page.navigate", { url: `${origin}/dashboards/${id}` })
+  // The launcher replaces this very tab onto the content origin.
+  await until(
+    `location.origin === "${contentOrigin}" && location.pathname === "/view/${id}"`
+  )
+  await until(
+    'document.querySelector("#dashboard-content")?.srcdoc.includes("已加载")'
+  )
+  assert.equal(await evaluate("location.hash"), "")
+  // Exactly one capability was minted and redeemed; nothing loaded the
+  // control origin's pages into a frame (there is no frame on either side
+  // except the single sandboxed content iframe).
+  const minted = recorded.filter(
+    (request) => request.path.endsWith("/view-capabilities")
+  )
+  assert.equal(minted.length, 1)
+  const fetched = recorded.filter((request) => request.path === "/content")
+  assert.equal(fetched.length, 1)
+  assert.equal(fetched[0].authorization, "Bearer test-capability")
+  assert.equal(
+    (await evaluate("document.querySelectorAll('iframe').length")),
+    1
+  )
+})
+
+test("viewer receives literal metadata and cannot use edit, sharing, or archive controls", async () => {
+  role = "viewer"
+  denied = false
+  recorded = []
+  html = '<!doctype html><h1 id="sample">已加载</h1>'
+  await call("Page.navigate", { url: `${origin}/dashboards/${id}/manage` })
   await until(
     'document.querySelector("#dashboard-title")?.textContent.includes("<img")'
   )
@@ -342,11 +416,13 @@ test("viewer receives literal metadata and cannot use edit, sharing, or archive 
     recorded.some((request) => request.path.endsWith("/grants")),
     false
   )
+  // The manage page embeds no viewer under the shipped control CSP.
+  assert.equal(await evaluate("document.querySelectorAll('iframe').length"), 0)
 })
 
 test('metadata conflict is visible inside the editing dialog and preserves the draft', async () => {
   role = 'owner'; patchConflict = true
-  await call('Page.navigate', { url: `${origin}/dashboards/${id}` })
+  await call('Page.navigate', { url: `${origin}/dashboards/${id}/manage` })
   await until('document.querySelector("#edit-metadata") && !document.querySelector("#edit-metadata").hidden')
   await evaluate('document.querySelector("#edit-metadata").click(); document.querySelector("#metadata-title").value="修订标题"; document.querySelector("#metadata-form").requestSubmit()')
   await until('document.querySelector("#metadata-dialog[open] [role=alert]")?.textContent.includes("其他操作更新")')
@@ -364,13 +440,19 @@ test("sandbox renders interactive HTML but blocks parent access, external calls,
     fetch('${origin}/api/v1/attack').catch(() => {});<\/script>`
   recorded = []
   await call("Page.navigate", {
-    url: `${contentOrigin}/render#test-capability`,
+    url: `${contentOrigin}/view/${id}#test-capability`,
   })
   await until(
     'location.hash === "" && document.querySelector("#dashboard-content") !== null'
   )
   await until(
     'document.querySelector("#dashboard-content")?.srcdoc.includes("increment")'
+  )
+  // R12: under the real bootstrap CSP the single iframe fills the viewport
+  // (no default 300x150, no double scrollbars).
+  await until(
+    '(() => { const r = document.querySelector("#dashboard-content").getBoundingClientRect();' +
+    'return r.width >= window.innerWidth - 2 && r.height >= window.innerHeight - 2 })()'
   )
   await delay(250)
   // Click until the sandboxed inline handler reports back; retrying guards
@@ -403,7 +485,7 @@ test("sandbox renders interactive HTML but blocks parent access, external calls,
   )
   assert.equal(await evaluate("Boolean(window.trustedCompromised)"), false)
   assert.equal(await evaluate('localStorage.getItem("attack")'), null)
-  assert.equal(await evaluate("location.pathname"), "/render")
+  assert.equal(await evaluate("location.pathname"), `/view/${id}`)
   assert.equal(
     recorded.some((request) => request.path.includes("attack")),
     false
@@ -414,12 +496,12 @@ test("sandbox renders interactive HTML but blocks parent access, external calls,
   )
 })
 
-test("revoked capability does not create an HTML rendering frame", async () => {
+test("revoked capability shows the back-to-control entry, never a frame", async () => {
   denied = true
   await call("Page.navigate", { url: "about:blank" })
   await until('location.href === "about:blank"')
   await call("Page.navigate", {
-    url: `${contentOrigin}/render#test-capability`,
+    url: `${contentOrigin}/view/${id}#test-capability`,
   })
   await until(
     'document.querySelector("#render-status")?.getAttribute("role") === "alert"'
@@ -429,6 +511,12 @@ test("revoked capability does not create an HTML rendering frame", async () => {
     null
   )
   assert.equal(await evaluate("location.hash"), "")
+  // The trusted coordinates injected by the server build the way back; the
+  // page never guesses a dashboard on its own.
+  assert.equal(
+    await evaluate('document.querySelector("#render-status a")?.href'),
+    `${origin}/dashboards/${id}`
+  )
   denied = false
 })
 
@@ -436,7 +524,7 @@ test("owner can publish a public permission change with revision and a fresh ide
   role = "owner"
   recorded = []
   publicGrant = null
-  await call("Page.navigate", { url: `${origin}/dashboards/${id}` })
+  await call("Page.navigate", { url: `${origin}/dashboards/${id}/manage` })
   await until(
     'document.querySelector("#public-enabled") && !document.querySelector("#sharing-panel").hidden'
   )
@@ -458,7 +546,7 @@ test("owner can publish a public permission change with revision and a fresh ide
 test("missing W3 deployment adapter fails closed without requesting protected data", async () => {
   authConfigured = false
   recorded = []
-  await call("Page.navigate", { url: `${origin}/dashboards/${id}` })
+  await call("Page.navigate", { url: `${origin}/dashboards/${id}/manage` })
   await until(
     'document.querySelector("#feedback")?.textContent.includes("尚未接入")'
   )
@@ -476,7 +564,7 @@ test("missing W3 deployment adapter fails closed without requesting protected da
 test("machine principal cannot use the human browser login seam", async () => {
   identityType = "service"
   recorded = []
-  await call("Page.navigate", { url: `${origin}/dashboards/${id}` })
+  await call("Page.navigate", { url: `${origin}/dashboards/${id}/manage` })
   await until(
     'document.querySelector("#feedback")?.textContent.includes("仅支持企业用户")'
   )
@@ -492,13 +580,15 @@ test("unconfigured rendering origin is never loaded by the trusted shell", async
   recorded = []
   await call("Page.navigate", { url: `${origin}/dashboards/${id}` })
   await until(
-    'document.querySelector("#viewer-status")?.textContent.includes("内容域配置不兼容")'
+    'document.querySelector("#view-status")?.textContent.includes("内容域配置不兼容")'
   )
-  assert.equal(await evaluate('document.querySelector("#viewer iframe")'), null)
+  assert.equal(await evaluate("document.querySelectorAll('iframe').length"), 0)
   assert.equal(
     recorded.some((request) => request.path === "/attack"),
     false
   )
+  // The tab stayed on the control origin: no navigation happened.
+  assert.equal(await evaluate("location.origin"), origin)
   renderOverride = null
 })
 
@@ -507,7 +597,7 @@ test("retry after uncertain permission mutation reuses its key, revision and abs
   publicGrant = null
   failPublicOnce = true
   recorded = []
-  await call("Page.navigate", { url: `${origin}/dashboards/${id}` })
+  await call("Page.navigate", { url: `${origin}/dashboards/${id}/manage` })
   await until(
     'document.querySelector("#sharing-panel") && !document.querySelector("#sharing-panel").hidden && document.querySelector("#grants").textContent.includes("暂无")'
   )
