@@ -1,126 +1,212 @@
-"""App factories. The CLI serves both origins in one worker process."""
+"""Control-origin application assembly.
+
+Dev/test entry points:
+  python -m dashboard_service serve-control   (uvicorn, port from env or 8080)
+  python -m dashboard_service serve-content   (uvicorn, port from env or 8081)
+Production runs the two apps as separate processes (design.md §9).
+"""
 import asyncio
 import logging
 from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlalchemy.exc import SQLAlchemyError
-from .api import API
-from .auth import Auth
+
 from .config import Config
-from .content import register_content
-from .models import ApiError, identifier
-from .store import Store
+from .content_app import create_content_app
+from .database import Database, create_db_engine
+from .errors import ApiError, new_id
+from .routers import build_service
+from .routers import access as access_router
+from .routers import dashboards as dashboards_router
+from .routers import groups_router, meta as meta_router, operations_router, view_router
+from .authn import Authenticator, HttpW3Verifier
 
-logger = logging.getLogger('dashboard_service')
+logger = logging.getLogger("dashboard_service")
+
+CONTROL_PAGE_CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    "connect-src 'self'; frame-src {content}; base-uri 'none'; form-action 'none'; "
+    "frame-ancestors 'none'"
+)
 
 
-class Guardrails:
-    def __init__(self, app, config):
-        self.app, self.config = app, config
-        self.slots = asyncio.Semaphore(config.max_uploads)
+class RequestGuards:
+    """Trace ids, no-store on dynamic responses, and hard body caps that do
+    not trust Content-Length (the true multipart byte count is enforced
+    while streaming in storage.stage_stream)."""
+
+    def __init__(self, app, config: Config):
+        self.app = app
+        self.config = config
+        self.upload_slots = asyncio.Semaphore(config.max_concurrent_uploads)
 
     async def __call__(self, scope, receive, send):
-        if scope['type']!='http':
-            return await self.app(scope,receive,send)
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = {k.lower(): v for k, v in scope.get("headers", [])}
+        is_multipart = b"multipart/form-data" in headers.get(b"content-type", b"")
+        limit = self.config.max_upload_bytes + 262144 if is_multipart else 131072
+        state = scope.setdefault("state", {})
+        state["trace_id"] = new_id()
+
         async def safe_send(message):
-            if message['type']=='http.response.start':
-                headers = list(message.get('headers',[]))
-                headers.extend([(b'cache-control',b'no-store'),(b'x-content-type-options',b'nosniff'),(b'referrer-policy',b'no-referrer'),(b'permissions-policy',b'camera=(), microphone=(), geolocation=()')])
-                message['headers'] = headers
+            if message["type"] == "http.response.start":
+                header_list = list(message.get("headers", []))
+                header_list.extend([
+                    (b"cache-control", b"no-store"),
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"referrer-policy", b"no-referrer"),
+                ])
+                message["headers"] = header_list
             await send(message)
-        if scope['method'] not in ('POST','PUT','PATCH'):
-            return await self.app(scope,receive,safe_send)
-        headers = dict(scope.get('headers',[]))
-        limit = self.config.max_upload_bytes+65536 if b'multipart/form-data' in headers.get(b'content-type',b'') else 65536
-        try:
-            declared = int(headers.get(b'content-length',b'0'))
-        except ValueError:
-            declared = limit+1
-        if declared>limit:
-            return await JSONResponse(dict(code='upload_too_large',message='Request body exceeds limit',trace_id=identifier()),status_code=413)(scope,receive,safe_send)
-        try:
-            await asyncio.wait_for(self.slots.acquire(),timeout=0.05)
-        except TimeoutError:
-            return await JSONResponse(dict(code='upload_busy',message='Upload concurrency limit reached',trace_id=identifier()),status_code=429)(scope,receive,safe_send)
-        total = 0
+
         async def bounded_receive():
-            nonlocal total
             message = await receive()
-            total += len(message.get('body',b''))
-            if total>limit:
-                raise ApiError(413,'upload_too_large','Request body exceeds limit')
+            if message.get("type") == "http.request" and is_multipart:
+                if int(headers.get(b"content-length", b"0") or 0) > limit:
+                    response = JSONResponse(
+                        {"code": "upload_too_large", "message": "Request body exceeds limit",
+                         "trace_id": state["trace_id"], "retryable": False},
+                        status_code=413)
+                    await response(scope, receive, safe_send)
+                    raise _ClientAbort()
             return message
+
+        slot_acquired = False
+        if is_multipart and scope["method"] == "POST":
+            try:
+                await asyncio.wait_for(self.upload_slots.acquire(), timeout=30)
+                slot_acquired = True
+            except TimeoutError:
+                response = JSONResponse(
+                    {"code": "upload_busy", "message": "Upload concurrency limit reached",
+                     "trace_id": state["trace_id"], "retryable": True},
+                    status_code=429, headers={"Retry-After": "3"})
+                await response(scope, receive, safe_send)
+                return
         try:
-            await self.app(scope,bounded_receive,safe_send)
+            await self.app(scope, bounded_receive, safe_send)
+        except _ClientAbort:
+            return
         finally:
-            self.slots.release()
+            if slot_acquired:
+                self.upload_slots.release()
 
 
-def configure_app(app, config):
-    app.add_middleware(Guardrails,config=config)
+class _ClientAbort(Exception):
+    pass
+
+
+def _error_body(code: str, message: str, trace_id: str, retryable: bool = False,
+                operation_id: str | None = None) -> dict:
+    body = {"code": code, "message": message, "trace_id": trace_id, "retryable": retryable}
+    if operation_id:
+        body["operation_id"] = operation_id
+    return body
+
+
+def create_control_app(config: Config | None = None, *, database: Database | None = None,
+                       verifier=None) -> FastAPI:
+    config = config or Config.from_env()
+    database = database or Database(create_db_engine(config.database_url))
+    verifier = verifier or HttpW3Verifier.from_config(config)
+    authenticator = Authenticator(config, database, verifier)
+    service = build_service(config, database, authenticator)
+
+    app = FastAPI(title="AresClaw Dashboard", docs_url=None, redoc_url=None,
+                  openapi_url=None)
+    app.state.service = service
+    app.add_middleware(RequestGuards, config=config)
 
     @app.exception_handler(ApiError)
-    async def api_error(request: Request,error: ApiError):
-        return JSONResponse(dict(code=error.code,message=error.message,trace_id=identifier()),status_code=error.status)
+    async def api_error(request: Request, error: ApiError):
+        trace_id = getattr(request.state, "trace_id", None) or new_id()
+        return JSONResponse(
+            _error_body(error.code, error.message, trace_id, error.retryable),
+            status_code=error.status)
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(request: Request,error: RequestValidationError):
-        return JSONResponse(dict(code='invalid_input',message='Invalid request fields',trace_id=identifier()),status_code=422)
+    async def validation_error(request: Request, error: RequestValidationError):
+        return JSONResponse(
+            _error_body("invalid_input", "Invalid request fields",
+                        getattr(request.state, "trace_id", None) or new_id()),
+            status_code=422)
 
     @app.exception_handler(SQLAlchemyError)
     @app.exception_handler(OSError)
-    async def storage_error(request: Request,error: Exception):
-        trace = identifier()
-        logger.error('storage_unavailable trace_id=%s error_type=%s',trace,type(error).__name__)
-        return JSONResponse(dict(code='storage_unavailable',message='Storage is unavailable; retry using the original request key',trace_id=trace),status_code=503)
+    async def storage_error(request: Request, error: Exception):
+        trace_id = getattr(request.state, "trace_id", None) or new_id()
+        logger.error("storage_unavailable trace_id=%s error_type=%s", trace_id,
+                     type(error).__name__)
+        return JSONResponse(
+            _error_body("database_unavailable",
+                        "A dependency is unavailable; query any operation with its key",
+                        trace_id, retryable=True),
+            status_code=503)
 
+    from .routers.dashboards import PendingOperation
 
-def create_app(config=None, *, store=None, test_configuration=False):
-    config = (config or (Config.testing() if test_configuration else Config.from_env())).validate()
-    store = store or Store(config)
-    auth = Auth(config,store)
-    api = API(config,store,auth)
-    app = FastAPI(title='AresClaw Dashboard',docs_url=None,redoc_url=None,openapi_url=None)
-    content_app = FastAPI(docs_url=None,redoc_url=None,openapi_url=None)
-    configure_app(app,config)
-    configure_app(content_app,config)
-    app.state.store, app.state.auth, app.state.config = store,auth,config
-    app.state.content_app = content_app
-    app.include_router(api.router)
-    web_dir = Path(__file__).resolve().parent.parent/'web'
-    register_content(app,content_app,api,web_dir)
-    control_policy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src " + config.content_origin + "; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    @app.exception_handler(PendingOperation)
+    async def pending(request: Request, pending: PendingOperation):
+        trace_id = getattr(request.state, "trace_id", None) or new_id()
+        return JSONResponse(
+            pending.outcome.wrapper | {"trace_id": trace_id},
+            status_code=202, headers={"Retry-After": str(pending.outcome.retry_after or 2)})
 
-    @app.get('/dashboards/{ident}')
-    def shell(ident: str):
-        return FileResponse(web_dir/'index.html',media_type='text/html',headers={'Content-Security-Policy':control_policy})
+    for module in (meta_router, dashboards_router, access_router, groups_router,
+                   operations_router, view_router):
+        app.include_router(module.router)
 
-    @app.get('/app.js')
-    def javascript():
-        return FileResponse(web_dir/'app.js',media_type='text/javascript')
+    web_dir = Path(__file__).resolve().parent.parent / "web"
+    page_policy = CONTROL_PAGE_CSP.format(content=config.content_origin)
 
-    @app.get('/auth-provider.js')
-    def auth_provider():
-        return FileResponse(web_dir/'auth-provider.js',media_type='text/javascript')
+    @app.get("/dashboards/{dashboard_id}", include_in_schema=False)
+    def dashboard_page(dashboard_id: str):
+        return FileResponse(web_dir / "index.html", media_type="text/html",
+                            headers={"Content-Security-Policy": page_policy})
 
-    @app.get('/styles.css')
-    def stylesheet():
-        return FileResponse(web_dir/'styles.css',media_type='text/css')
+    for name, media in (("app.js", "text/javascript"), ("auth-provider.js", "text/javascript"),
+                        ("styles.css", "text/css")):
+        def static_file(name=name, media=media):
+            return FileResponse(web_dir / name, media_type=media,
+                                headers={"X-Content-Type-Options": "nosniff"})
+        app.get(f"/{name}", include_in_schema=False)(static_file)
 
-    @app.get('/health/live')
+    @app.get("/", include_in_schema=False)
+    def index():
+        return FileResponse(web_dir / "index.html", media_type="text/html",
+                            headers={"Content-Security-Policy": page_policy})
+
+    @app.get("/health/live")
     def live():
-        return dict(status='ok')
+        return {"status": "ok"}
 
-    @app.get('/health/ready')
+    @app.get("/health/ready")
     def ready():
-        from sqlalchemy import select
-        from .store import locks
-        from .models import require
-        require(not config.recovery_mode,503,'recovery_isolation','Service is isolated for recovery')
-        with store.engine.connect() as connection:
-            require(connection.execute(select(locks.c.schema_version).where(locks.c.id==1)).scalar_one()==1,503,'schema_mismatch','Database schema mismatch')
-        require(store.root.is_dir(),503,'storage_unavailable','Content storage is unavailable')
-        return dict(status='ok',human_auth='configured' if config.w3_verify_url else 'disabled')
+        from sqlalchemy import text
+        checks = {"database": "ok", "storage": "ok", "human_auth":
+                  "configured" if config.w3_verify_url else "disabled"}
+        try:
+            database.verify_schema()
+        except RuntimeError as error:
+            checks["database"] = f"degraded: {error}"
+        if not service.store.root.is_dir():
+            checks["storage"] = "degraded: content directory missing"
+        healthy = checks["database"] == "ok" and checks["storage"] == "ok"
+        return JSONResponse({"status": "ok" if healthy else "degraded", "checks": checks,
+                             "recovery_mode": config.recovery_mode},
+                            status_code=200 if healthy else 503)
+
+    @app.get("/api/v1/health/deep", include_in_schema=False)
+    def deep():
+        with database.read_only() as connection:
+            connection.execute(text("SELECT 1"))
+        return Response("ok", media_type="text/plain")
+
     return app
+
+
+__all__ = ["create_control_app", "create_content_app", "build_service"]
