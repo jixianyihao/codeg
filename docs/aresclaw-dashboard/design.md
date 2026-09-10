@@ -18,7 +18,7 @@ AresClaw 是内网 Codeg 网页部署。用户在对话中生成单个静态 HTM
 | 对话入口 | Skill + Python 标准库 CLI；读取产物、冻结请求、直连公共 API |
 | 公共控制服务 | Python、FastAPI/Uvicorn、SQLAlchemy、PyMySQL、Alembic、PyJWT、Boto3；认证、ACL、发布、版本、配额、审计 |
 | 公共内容服务 | 同一 Python 包的独立入口进程；可信查看加载页与内容读取 |
-| MySQL 8 / InnoDB | 主体、ACL、群组、版本引用、双指针、operation、配额和审计 |
+| MySQL 5.7+（部署下限 5.7，8.x 兼容） / InnoDB | 主体、ACL、群组、版本引用、双指针、operation、配额和审计 |
 | 私有 S3 | 所有已提交 HTML 版本的唯一持久来源；本地仅暂存 |
 | 现有反向代理 | TLS、固定 Origin/路由、AresClaw 同源 API 转发 |
 

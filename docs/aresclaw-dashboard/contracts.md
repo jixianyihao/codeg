@@ -208,6 +208,8 @@ source 成功 JSON 含 dashboard_id、version_id、sha256、byte_size、output�
 
 ## 9. MySQL 与 S3
 
+部署下限 MySQL 5.7（8.x 同样支持）：文本排序规则为 `utf8mb4_unicode_ci`，连接字符集由服务端固定为 `utf8mb4`；过期操作恢复在 <8.0 时退化为普通 `FOR UPDATE`（恢复本身持独占守卫）；`CHECK` 约束仅在 8.0.16+ 作为数据库层纵深防御，5.7 下由应用层校验兜底，业务语义不变。
+
 | 表 | 核心字段/约束 |
 | --- | --- |
 | principals / identity_links | human/service主体；唯一issuer+enterprise_user_id映射 |

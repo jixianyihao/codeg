@@ -162,3 +162,16 @@ corepack pnpm build
 - [x] 记录真实W3/企业CA/SSO Cookie/生产S3条件写/容量与备份恢复的内网待验收项。
 
 最终交付须报告真实工作树状态和未完成项。用户已明确授权将本轮代码、测试和四份文档提交并推送至上述仓库的同名功能分支；合并主分支、迁移演示数据库和内网生产部署不在本次操作中。
+
+
+## 9. MySQL 5.7 适配（2026-09-10，提交 383d604a）
+
+部署目标降为 MySQL 5.7（8.x 保持兼容），改动与验证：
+
+- 排序规则 `utf8mb4_0900_as_ci`（仅 8.0）→ `utf8mb4_unicode_ci`（models、初始迁移、主体目录查询）。
+- 引擎连接固定 `charset=utf8mb4`，屏蔽 5.7 服务器默认 latin1 连接。
+- `Database.server_version`/`supports_skip_locked`：恢复扫描在 <8.0 退化为普通 `FOR UPDATE`（本就持独占守卫）。
+- 草稿迁移的 DROP/ADD CHECK 在 <8.0.16 跳过：5.7 解析但忽略 CHECK、无 ALTER CHECK 语法；CHECK 仅作 8.0.16+ 纵深防御，应用层校验不变。
+- compose 开发栈换 mysql:5.7 并显式 utf8mb4 服务器参数。
+
+真实双实例验证：5.7.44（13307）全量 150 通过 + 干净 venv alembic 三步迁移 + verify_schema（skip_locked 正确判 False）；8.4.6（13306）回归 150 通过；两版本连接字符集实测均为 utf8mb4。本地另存 5.7.44 免安装实例于 .aresclaw-build/mysql（data57，端口 13307）供复测。
