@@ -8,7 +8,7 @@
 | --- | --- |
 | 仓库/分支 | `https://github.com/jixianyihao/codeg.git` → `dashboard-publishing/impl` |
 | 最新提交 | `29fb6def`（docs: MySQL 5.7 适配记录） |
-| 基线 | `ae18f33e`（codeg release-v0.28.1）；分支共 18 个提交，全部已推送 |
+| 基线 | `ae18f33e`（codeg release-v0.28.1）；基线之上共 24 个提交，全部已推送 |
 | 内网取码方式 | 可直连 GitHub 则直接 clone；隔离网可用 `git bundle create dashboard.bundle dashboard-publishing/impl`（在能联网机器执行）后在内网 `git clone dashboard.bundle -b dashboard-publishing/impl` |
 | 当前完成度 | 服务/CLI/前端全功能可用；本地闭环验证齐全；**真实内网 W3 与 S3 未接入**（见 §9） |
 
