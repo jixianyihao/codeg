@@ -62,7 +62,7 @@ async def principals(request: Request, type: str | None = None, q: str = "",
             # One ordered directory query: per-type LIMIT followed by Python
             # truncation used to permanently hide groups/service accounts.
             # Explicit collation also makes name ties consistent across tables.
-            collation = "utf8mb4_0900_as_ci"
+            collation = "utf8mb4_unicode_ci"
             directory = union_all(
                 select(models.principals.c.id.label("id"), literal("user").label("type"),
                        models.principals.c.display_name.collate(collation).label("display_name"))

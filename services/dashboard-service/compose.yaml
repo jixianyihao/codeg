@@ -44,13 +44,18 @@ services:
   # Development-only MySQL and S3 (MinIO). Production uses the intranet
   # services; swap these out and keep the same env contract.
   mysql:
-    image: mysql:8.4
+    # MySQL 5.7 is the deployment floor (8.x also works; CHECK constraints
+    # are only enforced on 8.0.16+ — the application validates regardless).
+    image: mysql:5.7
     environment:
       MYSQL_ROOT_PASSWORD: dev-root
       MYSQL_DATABASE: aresclaw_dashboard
       MYSQL_USER: dashboard
       MYSQL_PASSWORD: dev-dashboard
-    command: ["--transaction-isolation=READ-COMMITTED"]
+    command:
+      - --transaction-isolation=READ-COMMITTED
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
       interval: 5s

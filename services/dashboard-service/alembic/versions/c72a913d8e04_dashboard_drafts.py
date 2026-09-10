@@ -14,6 +14,23 @@ branch_labels = None
 depends_on = None
 DT = sa.DateTime().with_variant(mysql.DATETIME(fsp=6), "mysql")
 
+def _check_constraints_enforced() -> bool:
+    """MySQL 8.0.16+ enforces CHECK constraints; 5.7 parses and ignores
+    them in CREATE TABLE and has no ALTER TABLE ... CHECK syntax at all,
+    so the drop/recreate pair must be skipped there (nothing was stored)."""
+    version = op.get_bind().dialect.server_version_info
+    return version is not None and version >= (8, 0, 16)
+
+
+def _replace_status_check(states: str) -> None:
+    if not _check_constraints_enforced():
+        return
+    op.drop_constraint("ck_dashboards_status", "dashboards", type_="check")
+    op.create_check_constraint("ck_dashboards_status", "dashboards",
+                               f"status IN ({states})")
+
+
+
 
 def upgrade() -> None:
     op.add_column("dashboards", sa.Column(
@@ -23,9 +40,7 @@ def upgrade() -> None:
     # dashboard pointer/timestamps and archived status remain untouched.
     op.execute("UPDATE dashboard_versions SET published_at = created_at")
     op.alter_column("dashboards", "published_at", existing_type=DT, nullable=True)
-    op.drop_constraint("ck_dashboards_status", "dashboards", type_="check")
-    op.create_check_constraint("ck_dashboards_status", "dashboards",
-                               "status IN ('draft','published','archived')")
+    _replace_status_check("'draft','published','archived'")
     op.create_foreign_key("fk_dashboards_draft_version", "dashboards", "dashboard_versions",
                           ["id", "draft_version_id"], ["dashboard_id", "id"], ondelete="RESTRICT")
 
@@ -45,6 +60,4 @@ def downgrade() -> None:
     op.drop_column("dashboards", "draft_version_id")
     op.drop_column("dashboard_versions", "published_at")
     op.alter_column("dashboards", "published_at", existing_type=DT, nullable=False)
-    op.drop_constraint("ck_dashboards_status", "dashboards", type_="check")
-    op.create_check_constraint("ck_dashboards_status", "dashboards",
-                               "status IN ('published','archived')")
+    _replace_status_check("'published','archived'")

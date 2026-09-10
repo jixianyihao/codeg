@@ -479,7 +479,11 @@ class Operations:
                     select(models.operations.c.id, models.operations.c.state)
                     .where(models.operations.c.state.in_(("accepted", "processing")),
                            models.operations.c.lease_until < to_db(now()))
-                    .with_for_update(skip_locked=True)).mappings().all()
+                    .with_for_update(
+                        # SKIP LOCKED needs MySQL 8.0+; recovery holds the
+                        # exclusive guard, so plain FOR UPDATE is safe on 5.7.
+                        skip_locked=self.database.supports_skip_locked
+                    )).mappings().all()
                 for row in stale:
                     full = connection.execute(
                         select(models.operations).where(models.operations.c.id == row["id"])

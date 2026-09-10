@@ -3,7 +3,7 @@
 设计、接口契约与当前验证记录统一维护在[看板文档入口](../../docs/aresclaw-dashboard/README.md)。
 
 独立部署的公共看板服务：Python 3.11+ / FastAPI / SQLAlchemy / PyMySQL /
-MySQL 8 / PyJWT / Alembic / Boto3(S3)。已发布 HTML 存私有 S3，MySQL 保存
+MySQL 5.7+/8.x / PyJWT / Alembic / Boto3(S3)。已发布 HTML 存私有 S3，MySQL 保存
 元数据、ACL、版本引用与操作记录。AresClaw 网页列表内提供管理面板，
 业务权限、发布事务和存储仍由本服务执行；不新增 AresClaw Rust 代理。
 

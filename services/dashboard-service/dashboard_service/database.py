@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine import make_url
 
 from . import models
 from .errors import new_id, now
@@ -36,8 +37,13 @@ def from_db(value: datetime | None) -> datetime | None:
 
 
 def create_db_engine(database_url: str) -> Engine:
+    # Pin the connection charset explicitly: MySQL 5.7 servers often default
+    # to latin1 connections and every text column here is utf8mb4.
+    url = make_url(database_url)
+    if not url.query.get("charset"):
+        url = url.set(query={**dict(url.query), "charset": "utf8mb4"})
     return create_engine(
-        database_url,
+        url,
         pool_pre_ping=True,
         isolation_level="READ COMMITTED",
         connect_args={"connect_timeout": 5, "read_timeout": 30, "write_timeout": 30},
@@ -47,6 +53,23 @@ def create_db_engine(database_url: str) -> Engine:
 class Database:
     def __init__(self, engine: Engine):
         self.engine = engine
+        self._server_version: tuple | None = None
+
+    @property
+    def server_version(self) -> tuple:
+        """Live server version tuple, e.g. (5, 7, 44) or (8, 4, 6)."""
+        if self._server_version is None:
+            with self.read_only() as connection:
+                raw = connection.execute(text("SELECT VERSION()")).scalar_one()
+            self._server_version = tuple(
+                int(part) for part in str(raw).split(".")[:2] if part.isdigit())
+        return self._server_version
+
+    @property
+    def supports_skip_locked(self) -> bool:
+        """FOR UPDATE SKIP LOCKED needs MySQL 8.0+; 5.7 falls back to plain
+        row locks (recovery runs under the exclusive guard anyway)."""
+        return self.server_version >= (8, 0)
 
     @contextmanager
     def transaction(self) -> Iterator[Connection]:
